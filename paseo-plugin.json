@@ -1,0 +1,9 @@
+{
+  "id": "paseo-screen",
+  "name": "Host screen",
+  "icon": "assets/icon.png",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.12.0"
+  }
+}

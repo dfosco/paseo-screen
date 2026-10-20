@@ -1,0 +1,6 @@
+node_modules/
+build/
+# Extracted Paseo app and SDK used by the dev scripts; not ours to redistribute.
+.research/
+.DS_Store
+*.log

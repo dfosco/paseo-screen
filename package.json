@@ -1,0 +1,53 @@
+{
+  "name": "paseo-screen",
+  "version": "0.1.0",
+  "description": "See and control the Paseo host Mac screen from any paired Paseo client, over the existing Paseo connection.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Kevin Lai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevguy/paseo-screen.git"
+  },
+  "homepage": "https://github.com/kevguy/paseo-screen#readme",
+  "bugs": {
+    "url": "https://github.com/kevguy/paseo-screen/issues"
+  },
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "remote-desktop",
+    "screen-sharing",
+    "macos",
+    "vnc"
+  ],
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "README.md",
+    "LICENSE",
+    "assets/",
+    "images/",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/",
+    "helper/"
+  ],
+  "scripts": {
+    "embed": "node scripts/embed-helper.mjs",
+    "typecheck": "node scripts/embed-helper.mjs && tsc --noEmit",
+    "test": "node scripts/geometry-check.mjs"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.12.0",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/node": "^20.19.43",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}
