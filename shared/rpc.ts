@@ -23,8 +23,8 @@ const statusSchema = z.object({
   error: z.string().nullable(),
   screenRecording: z.boolean(),
   accessibility: z.boolean(),
-  /** The host is showing its lock screen. */
-  locked: z.boolean(),
+  /** The host is showing its lock screen. Absent from hosts running 0.1.0. */
+  locked: z.boolean().default(false),
   displays: z.array(displaySchema),
   /** The display a viewer last chose on this host, if it is still connected. */
   preferredDisplay: z.number().nullable(),
@@ -52,15 +52,19 @@ export const frameRpc = defineRpc({
     quality: z.number().min(0.1).max(1),
     /** Hash of the frame the client already shows; an identical frame comes back without image data. */
     since: z.string().optional(),
+    /** Wake the host's displays if they are asleep. Without it, a sleeping host replies `asleep`. */
+    wake: z.boolean().optional(),
   }),
+  // While the host's displays are asleep, a reply carries only `asleep` and `locked`.
   output: z.object({
-    display: displaySchema,
-    imageWidth: z.number(),
-    imageHeight: z.number(),
-    hash: z.string(),
-    bytes: z.number(),
-    /** The host is showing its lock screen. */
-    locked: z.boolean(),
+    asleep: z.boolean().optional(),
+    display: displaySchema.optional(),
+    imageWidth: z.number().optional(),
+    imageHeight: z.number().optional(),
+    hash: z.string().optional(),
+    bytes: z.number().optional(),
+    /** The host is showing its lock screen. Absent from hosts running 0.1.0. */
+    locked: z.boolean().default(false),
     unchanged: z.boolean().optional(),
     jpeg: z.string().optional(),
   }),

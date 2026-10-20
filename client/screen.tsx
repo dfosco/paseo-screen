@@ -111,7 +111,13 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
 
       <PermissionBanner styles={styles} status={status.data} loading={status.isLoading} requesting={request.isPending} onRequest={() => request.mutate()} />
       {frames.error || inputError ? <Text style={styles.error}>{frames.error ?? inputError}</Text> : null}
-      {frames.locked ? (
+      {frames.asleep ? (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>The host's display is asleep.</Text>
+          <ToolButton styles={styles} label="Wake display" onPress={frames.wake} />
+        </View>
+      ) : null}
+      {frames.locked && !frames.asleep ? (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
             {isWeb

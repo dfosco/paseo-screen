@@ -28,6 +28,9 @@ export interface FrameState {
   kilobytes: number;
   /** The host is showing its lock screen. */
   locked: boolean;
+  /** The host's displays are asleep; call wake() to wake them. */
+  asleep: boolean;
+  wake(): void;
 }
 
 /** Frame requests kept in flight, so a slow round trip does not leave the link idle. */
@@ -51,7 +54,15 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
   const frame = useRpc(frameRpc);
   const frameRef = useRef(frame);
   frameRef.current = frame;
-  const [state, setState] = useState<FrameState>({ uri: null, display: null, error: null, fps: 0, latencyMs: 0, kilobytes: 0, locked: false });
+  const [state, setState] = useState<Omit<FrameState, "wake">>({
+    uri: null, display: null, error: null, fps: 0, latencyMs: 0, kilobytes: 0, locked: false, asleep: false,
+  });
+  // Set when the viewer opens or the user asks; the next frame request wakes a sleeping host.
+  // Ordinary polling never wakes it, so an open viewer does not stop the host from sleeping or locking.
+  const wakeNext = useRef(true);
+  const wake = useCallback(() => {
+    wakeNext.current = true;
+  }, []);
 
   // Rounded to 160 px steps so resizing the viewer does not restart the loop on every pixel.
   const wanted = viewWidth > 0 ? Math.ceil((viewWidth * Math.min(PixelRatio.get(), 2)) / 160) * 160 : quality.maxWidth;
@@ -61,6 +72,7 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
     if (!active) return;
     let cancelled = false;
     let since: string | undefined;
+    wakeNext.current = true;
     let nextSequence = 0;
     let appliedSequence = -1;
     const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -80,7 +92,9 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
       const startedAt = Date.now();
       let delay = quality.intervalMs;
       try {
-        const result = await frameRef.current({ display: displayId, maxWidth, quality: quality.quality, since });
+        const wakeHost = wakeNext.current;
+        wakeNext.current = false;
+        const result = await frameRef.current({ display: displayId, maxWidth, quality: quality.quality, since, wake: wakeHost });
         if (cancelled) return;
         const now = Date.now();
         replies.push(now);
@@ -96,11 +110,12 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
           if (result.jpeg) since = result.hash;
           setState((previous) => ({
             uri: result.jpeg ? `data:image/jpeg;base64,${result.jpeg}` : previous.uri,
-            display: result.display,
+            display: result.display ?? previous.display,
+            asleep: result.asleep === true,
             error: null,
             fps: replies.length / 3,
             latencyMs: median(latencies),
-            kilobytes: result.jpeg ? Math.round(result.bytes / 1024) : previous.kilobytes,
+            kilobytes: result.jpeg && result.bytes ? Math.round(result.bytes / 1024) : previous.kilobytes,
             locked: result.locked,
           }));
         }
@@ -120,7 +135,7 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
     };
   }, [active, displayId, quality, maxWidth]);
 
-  return state;
+  return { ...state, wake };
 }
 
 /**

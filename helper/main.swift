@@ -120,11 +120,13 @@ func clampToDesktop(_ location: CGPoint) -> CGPoint {
 }
 
 /// Wakes sleeping displays the way a key press would, and waits briefly for them to come back.
-/// Only used when nothing is awake, so it never keeps an idle Mac from sleeping or locking on schedule.
+/// Called only for an explicit request (opening the viewer, the Wake button, or input), never from
+/// ordinary frame polling, so an open viewer does not keep the host from sleeping or locking.
 func wakeDisplays() -> [DisplayInfo] {
   var assertion: IOPMAssertionID = 0
-  IOPMAssertionDeclareUserActivity("Paseo Host screen viewer" as CFString, kIOPMUserActiveLocal, &assertion)
-  for _ in 0..<20 {
+  let declared = IOPMAssertionDeclareUserActivity("Paseo Host screen viewer" as CFString, kIOPMUserActiveLocal, &assertion)
+  defer { if declared == kIOReturnSuccess { IOPMAssertionRelease(assertion) } }
+  for _ in 0..<30 {
     let displays = activeDisplays()
     if !displays.isEmpty { return displays }
     usleep(100_000)
@@ -132,16 +134,22 @@ func wakeDisplays() -> [DisplayInfo] {
   return []
 }
 
+struct DisplaysAsleep: Error {}
+
 /// True while the login session is locked (the lock screen is showing).
 func screenLocked() -> Bool {
   let session = CGSessionCopyCurrentDictionary() as? [String: Any]
   return (session?["CGSSessionScreenIsLocked"] as? Bool) ?? false
 }
 
-func resolveDisplay(_ requested: Any?) throws -> DisplayInfo {
+/// Asleep displays are not "active", so an empty list means the screen is off. With `wake`, the
+/// displays are woken; otherwise DisplaysAsleep is thrown.
+func resolveDisplay(_ requested: Any?, wake: Bool) throws -> DisplayInfo {
   var displays = activeDisplays()
-  // Asleep displays are not "active", so an empty list means the screen is off; wake it.
-  if displays.isEmpty { displays = wakeDisplays() }
+  if displays.isEmpty {
+    guard wake else { throw DisplaysAsleep() }
+    displays = wakeDisplays()
+  }
   if let number = requested as? NSNumber, number.intValue != 0 {
     if let match = displays.first(where: { Int($0.id) == number.intValue }) { return match }
   }
@@ -199,7 +207,13 @@ func captureFrame(_ request: [String: Any]) throws -> [String: Any] {
   guard CGPreflightScreenCaptureAccess() else {
     throw HelperError("Screen Recording permission is not granted to Paseo")
   }
-  let display = try resolveDisplay(request["display"])
+  let display: DisplayInfo
+  do {
+    display = try resolveDisplay(request["display"], wake: (request["wake"] as? Bool) ?? false)
+  } catch is DisplaysAsleep {
+    // Polling never wakes the host; the viewer shows "asleep" and offers a Wake button.
+    return ["asleep": true, "locked": screenLocked()]
+  }
   let maxWidth = max(320, (request["maxWidth"] as? NSNumber)?.intValue ?? 1600)
   let quality = min(1, max(0.1, (request["quality"] as? NSNumber)?.doubleValue ?? 0.6))
 
@@ -384,7 +398,8 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
   guard AXIsProcessTrusted() else {
     throw HelperError("Accessibility permission is not granted to Paseo")
   }
-  let display = try resolveDisplay(request["display"])
+  // Input is an explicit action, so it wakes a sleeping display before it lands.
+  let display = try resolveDisplay(request["display"], wake: true)
   let events = (request["events"] as? [[String: Any]]) ?? []
   for event in events {
     let flags = modifierFlags(event["modifiers"])
