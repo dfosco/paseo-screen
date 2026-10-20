@@ -111,6 +111,15 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
 
       <PermissionBanner styles={styles} status={status.data} loading={status.isLoading} requesting={request.isPending} onRequest={() => request.mutate()} />
       {frames.error || inputError ? <Text style={styles.error}>{frames.error ?? inputError}</Text> : null}
+      {frames.locked ? (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>
+            {isWeb
+              ? "This Mac is locked. Click the picture, type your password and press Return to unlock it."
+              : "This Mac is locked. Type your password in the box below and press ⏎ to unlock it."}
+          </Text>
+        </View>
+      ) : null}
 
       <View style={styles.stage} onLayout={(event: LayoutChangeEvent) => setStage(event.nativeEvent.layout)}>
         {frames.uri ? (

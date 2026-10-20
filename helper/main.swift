@@ -13,6 +13,7 @@ import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import ImageIO
+import IOKit.pwr_mgt
 import ScreenCaptureKit
 import UniformTypeIdentifiers
 
@@ -118,13 +119,34 @@ func clampToDesktop(_ location: CGPoint) -> CGPoint {
   return best
 }
 
+/// Wakes sleeping displays the way a key press would, and waits briefly for them to come back.
+/// Only used when nothing is awake, so it never keeps an idle Mac from sleeping or locking on schedule.
+func wakeDisplays() -> [DisplayInfo] {
+  var assertion: IOPMAssertionID = 0
+  IOPMAssertionDeclareUserActivity("Paseo Host screen viewer" as CFString, kIOPMUserActiveLocal, &assertion)
+  for _ in 0..<20 {
+    let displays = activeDisplays()
+    if !displays.isEmpty { return displays }
+    usleep(100_000)
+  }
+  return []
+}
+
+/// True while the login session is locked (the lock screen is showing).
+func screenLocked() -> Bool {
+  let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+  return (session?["CGSSessionScreenIsLocked"] as? Bool) ?? false
+}
+
 func resolveDisplay(_ requested: Any?) throws -> DisplayInfo {
-  let displays = activeDisplays()
+  var displays = activeDisplays()
+  // Asleep displays are not "active", so an empty list means the screen is off; wake it.
+  if displays.isEmpty { displays = wakeDisplays() }
   if let number = requested as? NSNumber, number.intValue != 0 {
     if let match = displays.first(where: { Int($0.id) == number.intValue }) { return match }
   }
   if let main = displays.first(where: { $0.main }) ?? displays.first { return main }
-  throw HelperError("no active display")
+  throw HelperError("The host's display is asleep and did not wake up")
 }
 
 // MARK: - Capture
@@ -210,6 +232,7 @@ func captureFrame(_ request: [String: Any]) throws -> [String: Any] {
     "imageHeight": image.height,
     "hash": hash,
     "bytes": data.count,
+    "locked": screenLocked(),
   ]
   if let since = request["since"] as? String, since == hash {
     result["unchanged"] = true
@@ -486,6 +509,7 @@ func status() -> [String: Any] {
   [
     "screenRecording": CGPreflightScreenCaptureAccess(),
     "accessibility": AXIsProcessTrusted(),
+    "locked": screenLocked(),
     "displays": activeDisplays().map(\.json),
   ]
 }

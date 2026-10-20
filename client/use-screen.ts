@@ -26,6 +26,8 @@ export interface FrameState {
   /** Median request-to-reply time of recent frames. */
   latencyMs: number;
   kilobytes: number;
+  /** The host is showing its lock screen. */
+  locked: boolean;
 }
 
 /** Frame requests kept in flight, so a slow round trip does not leave the link idle. */
@@ -49,7 +51,7 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
   const frame = useRpc(frameRpc);
   const frameRef = useRef(frame);
   frameRef.current = frame;
-  const [state, setState] = useState<FrameState>({ uri: null, display: null, error: null, fps: 0, latencyMs: 0, kilobytes: 0 });
+  const [state, setState] = useState<FrameState>({ uri: null, display: null, error: null, fps: 0, latencyMs: 0, kilobytes: 0, locked: false });
 
   // Rounded to 160 px steps so resizing the viewer does not restart the loop on every pixel.
   const wanted = viewWidth > 0 ? Math.ceil((viewWidth * Math.min(PixelRatio.get(), 2)) / 160) * 160 : quality.maxWidth;
@@ -99,6 +101,7 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
             fps: replies.length / 3,
             latencyMs: median(latencies),
             kilobytes: result.jpeg ? Math.round(result.bytes / 1024) : previous.kilobytes,
+            locked: result.locked,
           }));
         }
         delay = Math.max(0, quality.intervalMs - (now - startedAt));

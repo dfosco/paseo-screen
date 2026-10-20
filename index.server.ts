@@ -10,18 +10,19 @@ export default function contribute(server: PluginServerContext) {
   const input = new HelperProcess(log);
 
   async function readStatus(command: "status" | "request"): Promise<ScreenStatus> {
-    const failed = { screenRecording: false, accessibility: false, displays: [], preferredDisplay: null };
+    const failed = { screenRecording: false, accessibility: false, locked: false, displays: [], preferredDisplay: null };
     if (process.platform !== "darwin") {
       return { ...failed, supported: false, error: "Screen sharing is only available on macOS hosts." };
     }
     try {
-      const status = await capture.request<Pick<ScreenStatus, "screenRecording" | "accessibility" | "displays">>(command);
+      const status = await capture.request<Pick<ScreenStatus, "screenRecording" | "accessibility" | "locked" | "displays">>(command);
       const preferred = await readPreferredDisplay();
       return {
         supported: true,
         error: null,
         screenRecording: status.screenRecording,
         accessibility: status.accessibility,
+        locked: status.locked,
         displays: status.displays,
         preferredDisplay: status.displays.some((display) => display.id === preferred) ? preferred : null,
       };

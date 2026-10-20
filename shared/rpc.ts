@@ -23,6 +23,8 @@ const statusSchema = z.object({
   error: z.string().nullable(),
   screenRecording: z.boolean(),
   accessibility: z.boolean(),
+  /** The host is showing its lock screen. */
+  locked: z.boolean(),
   displays: z.array(displaySchema),
   /** The display a viewer last chose on this host, if it is still connected. */
   preferredDisplay: z.number().nullable(),
@@ -57,6 +59,8 @@ export const frameRpc = defineRpc({
     imageHeight: z.number(),
     hash: z.string(),
     bytes: z.number(),
+    /** The host is showing its lock screen. */
+    locked: z.boolean(),
     unchanged: z.boolean().optional(),
     jpeg: z.string().optional(),
   }),

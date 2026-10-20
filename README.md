@@ -14,6 +14,7 @@ It was built for the moments when an agent on a remote Mac needs a human: watchi
 - Two-way text clipboard on desktop and web clients. ⌘V pastes your clipboard on the host, and ⌘C on the host copies back to you.
 - Multiple displays: each one is listed by name, the last choice is remembered, and a drag that leaves the picture continues onto the neighbouring display.
 - Phones: tap to click, long-press to right-click, pinch to zoom, drag to pan, and a Rotate button that turns the picture sideways.
+- Wakes the host's display when you open the viewer, and shows the lock screen if the Mac is locked so you can type your password to unlock it.
 - View-only mode, and Fast / Balanced / Sharp quality presets.
 
 ![Viewing the host's second display](images/desktop-viewer.jpg)
@@ -67,6 +68,7 @@ Anyone paired with the host can see and control its screen while the plugin is e
 - Only Mac hosts are supported. Any Paseo client can view.
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.
 - Granting the two macOS permissions needs someone physically at the host once.
+- The plugin doesn't stop the host from sleeping or locking on its own schedule. When it has, the viewer wakes the display and you unlock it by typing your password. Touch ID isn't available remotely.
 - Shortcuts your own computer or the Paseo app handle first (⌘Tab, ⌘Space, ⌘W, ⌘Q) need the key bar buttons.
 - Clipboard sync is text only, and only on desktop and web clients.
 - Keys are sent by physical position, so both computers should use the same keyboard layout.
