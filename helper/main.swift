@@ -382,7 +382,8 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
         .post(tap: .cghidEventTap)
     case "key":
       // Either a physical key code, or a character resolved on the host's layout.
-      let resolved = (event["char"] as? String).flatMap(\.first).flatMap(keyCode(for:))
+      let char = (event["char"] as? String)?.first
+      let resolved = char.flatMap { keyCode(for: $0, command: flags.contains(.maskCommand)) ?? ansiLetterKeys[$0.lowercased().first ?? $0] }
       guard let code = resolved ?? (event["keyCode"] as? NSNumber)?.uint16Value else {
         throw HelperError("no key for \(event["char"] ?? event["keyCode"] ?? "nil") on this keyboard layout")
       }
@@ -402,7 +403,7 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
       pasteboard.clearContents()
       pasteboard.setString((event["text"] as? String) ?? "", forType: .string)
       usleep(30_000)
-      let v = keyCode(for: "v") ?? 9
+      let v = keyCode(for: "v", command: true) ?? 9
       withModifiers(.maskCommand) {
         postKey(v, down: true, flags: .maskCommand)
         postKey(v, down: false, flags: .maskCommand)
@@ -417,9 +418,18 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
   return result
 }
 
-/// Virtual key code that types `character` (unshifted) on the host's current keyboard layout,
-/// so shortcuts like Cmd+V and Cmd+W work on Dvorak, AZERTY and other layouts.
-func keyCode(for character: Character) -> CGKeyCode? {
+/// Fallback key codes (US ANSI positions) for letters a layout cannot produce, such as Latin
+/// letters on a Cyrillic layout without Command held.
+let ansiLetterKeys: [Character: CGKeyCode] = [
+  "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13,
+  "e": 14, "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+]
+
+/// Virtual key code that types `character` on the host's current keyboard layout, so shortcuts like
+/// Cmd+V and Cmd+W work on Dvorak, AZERTY and other layouts. With `command`, the lookup uses the
+/// layout's Command-key table, which is what shortcuts actually follow (for example "Dvorak - QWERTY ⌘",
+/// or Latin shortcuts on Cyrillic, Greek and Hebrew layouts).
+func keyCode(for character: Character, command: Bool = false) -> CGKeyCode? {
   onMain {
     guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
           let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
@@ -431,7 +441,8 @@ func keyCode(for character: Character) -> CGKeyCode? {
         var deadKeys: UInt32 = 0
         var length = 0
         var chars = [UniChar](repeating: 0, count: 4)
-        let status = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+        let modifiers = command ? UInt32((cmdKey >> 8) & 0xFF) : 0
+        let status = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), modifiers, UInt32(LMGetKbdType()),
                                     OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, chars.count, &length, &chars)
         if status == noErr, length > 0, String(utf16CodeUnits: chars, count: length) == target { return CGKeyCode(code) }
       }

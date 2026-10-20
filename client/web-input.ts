@@ -99,7 +99,8 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       event.preventDefault();
       // deltaMode 1 is lines, 2 is pages; the host scrolls in pixels.
       const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
-      send({ type: "scroll", ...at(event), dx: event.deltaX * factor, dy: event.deltaY * factor });
+      const clamp = (value: number) => Math.max(-10_000, Math.min(10_000, value * factor));
+      send({ type: "scroll", ...at(event), dx: clamp(event.deltaX), dy: clamp(event.deltaY) });
     };
     const onContextMenu = (event: DomMouseEvent) => event.preventDefault();
     // Cmd+V is not forwarded as a key. The browser's paste event carries this client's clipboard,
@@ -107,6 +108,8 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
     let pasteTimer: ReturnType<typeof setTimeout> | undefined;
     const cmdTapped = new Set<string>();
     const onKey = (down: boolean) => (event: DomKeyboardEvent) => {
+      // A key pressed again without Cmd is a normal press, even if its last Cmd press never sent a keyup.
+      if (down && !event.metaKey) cmdTapped.delete(event.code);
       if (event.metaKey && event.code === "KeyV") {
         if (down && !event.repeat) {
           clearTimeout(pasteTimer);

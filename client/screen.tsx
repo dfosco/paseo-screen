@@ -176,7 +176,8 @@ function KeyBar({ styles, compact, send, clipboard }: {
   const [text, setText] = useState("");
   const key = (keyCode: number, modifiers: ScreenModifier[] = []) => () => send({ type: "key", keyCode, modifiers });
   const submit = (withEnter: boolean) => {
-    if (text) send({ type: "text", text });
+    // Text events carry at most 10,000 characters each.
+    for (let start = 0; start < text.length; start += 10_000) send({ type: "text", text: text.slice(start, start + 10_000) });
     if (withEnter) send({ type: "key", keyCode: KEY.enter });
     setText("");
   };
