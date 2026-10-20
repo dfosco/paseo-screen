@@ -28,7 +28,7 @@ It was built for the moments when an agent on a remote Mac needs a human: watchi
 2. Install the plugin on the host:
 
    ```bash
-   paseo plugin install npm:paseo-screen
+   paseo plugin install npm:@kevlai22/paseo-screen
    # or from GitHub
    paseo plugin install git:kevguy/paseo-screen
    ```

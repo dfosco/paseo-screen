@@ -1,5 +1,5 @@
 {
-  "name": "paseo-screen",
+  "name": "@kevlai22/paseo-screen",
   "version": "0.1.0",
   "description": "See and control the Paseo host Mac screen from any paired Paseo client, over the existing Paseo connection.",
   "type": "module",
@@ -49,5 +49,8 @@
     "react-native": "0.81.5",
     "typescript": "^5.9.3",
     "zod": "^4.4.3"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
