@@ -75,9 +75,20 @@ export const inputEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("down"), ...point, button, clickCount: z.number().int().min(1).optional(), modifiers }),
   z.object({ type: z.literal("up"), ...dragPoint, button, clickCount: z.number().int().min(1).optional(), modifiers }),
   z.object({ type: z.literal("click"), ...point, button, count: z.number().int().min(1).max(3).optional(), modifiers }),
-  z.object({ type: z.literal("scroll"), x: point.x.optional(), y: point.y.optional(), dx: z.number(), dy: z.number() }),
-  /** macOS virtual key code. Omit `down` to press and release. */
-  z.object({ type: z.literal("key"), keyCode: z.number().int().min(0).max(127), down: z.boolean().optional(), modifiers }),
+  z.object({ type: z.literal("scroll"), x: point.x.optional(), y: point.y.optional(), dx: z.number().min(-10_000).max(10_000), dy: z.number().min(-10_000).max(10_000) }),
+  /**
+   * A macOS virtual key code (a physical key position), or `char`, a character the host maps to a key
+   * on its own keyboard layout. Omit `down` to press and release.
+   */
+  z
+    .object({
+      type: z.literal("key"),
+      keyCode: z.number().int().min(0).max(127).optional(),
+      char: z.string().min(1).max(2).optional(),
+      down: z.boolean().optional(),
+      modifiers,
+    })
+    .refine((event) => event.keyCode !== undefined || event.char !== undefined, "key needs keyCode or char"),
   z.object({ type: z.literal("text"), text: z.string().max(10_000) }),
   /** Sets the host clipboard to `text`, then presses Cmd+V on the host. */
   z.object({ type: z.literal("paste"), text: z.string().max(1_000_000) }),

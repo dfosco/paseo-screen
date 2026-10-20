@@ -1,28 +1,46 @@
 import { execCommand, spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { HELPER_SOURCE, HELPER_SOURCE_HASH } from "./helper-source.generated";
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/** After a failed build, wait this long before trying again, so status polling does not retry constantly. */
+const BUILD_RETRY_MS = 60_000;
+const CACHE_ROOT = path.join(homedir(), "Library", "Caches", "paseo-screen");
 
 /** Compiles the embedded Swift helper once per source revision and returns the binary path. */
 let buildPromise: Promise<string> | null = null;
+let lastFailure: { at: number; error: unknown } | null = null;
 export function ensureHelperBinary(): Promise<string> {
-  buildPromise ??= buildHelper().catch((error) => {
-    buildPromise = null;
-    throw error;
-  });
+  if (!buildPromise && lastFailure && Date.now() - lastFailure.at < BUILD_RETRY_MS) return Promise.reject(lastFailure.error);
+  buildPromise ??= buildHelper().then(
+    (binary) => {
+      lastFailure = null;
+      return binary;
+    },
+    (error: unknown) => {
+      buildPromise = null;
+      lastFailure = { at: Date.now(), error };
+      throw error;
+    },
+  );
   return buildPromise;
 }
 
 async function buildHelper(): Promise<string> {
-  const dir = path.join(homedir(), "Library", "Caches", "paseo-screen", HELPER_SOURCE_HASH);
+  const dir = path.join(CACHE_ROOT, HELPER_SOURCE_HASH);
   const binary = path.join(dir, "paseo-screen-helper");
   if (existsSync(binary)) return binary;
+  // `xcode-select -p` only reports; calling xcrun without the tools would pop up the macOS install prompt.
+  try {
+    await execCommand("/usr/bin/xcode-select", ["-p"], { timeout: 10_000 });
+  } catch {
+    throw new Error("The Xcode command line tools are needed to build the screen helper. Run `xcode-select --install` on the host, then reopen the screen.");
+  }
   await mkdir(dir, { recursive: true });
   const source = path.join(dir, "main.swift");
   const partial = `${binary}.partial`;
@@ -37,7 +55,16 @@ async function buildHelper(): Promise<string> {
     throw new Error(`Could not build the screen helper. Install the Xcode command line tools (xcode-select --install). ${detail}`);
   }
   await rename(partial, binary);
+  await removeOldBuilds();
   return binary;
+}
+
+/** Deletes helpers built from earlier source revisions. */
+async function removeOldBuilds(): Promise<void> {
+  const entries = await readdir(CACHE_ROOT).catch(() => [] as string[]);
+  await Promise.all(
+    entries.filter((name) => name !== HELPER_SOURCE_HASH).map((name) => rm(path.join(CACHE_ROOT, name), { recursive: true, force: true })),
+  );
 }
 
 type Reply = Record<string, unknown> & { ok: boolean; error?: string };
@@ -47,6 +74,8 @@ export class HelperProcess {
   private child: ChildProcessWithoutNullStreams | null = null;
   private starting: Promise<ChildProcessWithoutNullStreams> | null = null;
   private nextId = 1;
+  /** Set by stop(); a stopped helper never starts again, even if a build finishes afterwards. */
+  private stopped = false;
   private pending = new Map<number, { resolve: (reply: Reply) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
 
   constructor(private readonly log: (message: string) => void) {}
@@ -67,6 +96,7 @@ export class HelperProcess {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
     const child = this.child;
     this.child = null;
     this.failPending(new Error("screen helper stopped"));
@@ -74,9 +104,11 @@ export class HelperProcess {
   }
 
   private start(): Promise<ChildProcessWithoutNullStreams> {
+    if (this.stopped) return Promise.reject(new Error("screen helper stopped"));
     if (this.child) return Promise.resolve(this.child);
     this.starting ??= ensureHelperBinary()
       .then((binary) => {
+        if (this.stopped) throw new Error("screen helper stopped");
         const child = spawnProcess(binary, [], { stdio: "pipe" });
         child.on("exit", (code, signal) => {
           if (this.child === child) this.child = null;

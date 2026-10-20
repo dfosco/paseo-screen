@@ -70,11 +70,15 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
     // While a button is down, moves and the release are read from the document so a drag
     // that leaves the view still ends on the host instead of leaving the button held.
     let pressed = 0;
+    let lastButton: (typeof BUTTONS)[number] = "left";
+    let lastPoint = { x: 0.5, y: 0.5 };
 
     const onMouseDown = (event: DomMouseEvent) => {
       event.preventDefault();
       element.focus();
       pressed += 1;
+      lastButton = button(event);
+      lastPoint = at(event);
       send({ type: "down", ...at(event), button: button(event), clickCount: Math.max(1, event.detail), modifiers: modifiersOf(event) });
     };
     const onMouseUp = (event: DomMouseEvent) => {
@@ -87,7 +91,9 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       if (pressed === 0) send({ type: "move", ...at(event) });
     };
     const onDocumentMouseMove = (event: DomMouseEvent) => {
-      if (pressed > 0) send({ type: "move", ...at(event, true) });
+      if (pressed === 0) return;
+      lastPoint = at(event, true);
+      send({ type: "move", ...lastPoint });
     };
     const onWheel = (event: DomWheelEvent) => {
       event.preventDefault();
@@ -99,6 +105,7 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
     // Cmd+V is not forwarded as a key. The browser's paste event carries this client's clipboard,
     // which is put on the host clipboard and pasted there. If no paste event arrives, fall back.
     let pasteTimer: ReturnType<typeof setTimeout> | undefined;
+    const cmdTapped = new Set<string>();
     const onKey = (down: boolean) => (event: DomKeyboardEvent) => {
       if (event.metaKey && event.code === "KeyV") {
         if (down && !event.repeat) {
@@ -110,7 +117,15 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       const keyCode = MAC_KEY_CODES[event.code];
       event.preventDefault();
       if (keyCode === undefined) return;
-      send({ type: "key", keyCode, down, modifiers: modifiersOf(event) });
+      // Mac browsers send no keyup for a key released while Cmd is held, so a Cmd shortcut is
+      // sent as one press-and-release and its keyup, if one comes, is dropped.
+      if (!down && cmdTapped.delete(event.code)) return;
+      if (down && event.metaKey) {
+        cmdTapped.add(event.code);
+        send({ type: "key", keyCode, modifiers: modifiersOf(event) });
+      } else {
+        send({ type: "key", keyCode, down, modifiers: modifiersOf(event) });
+      }
       if (down && event.metaKey && (event.code === "KeyC" || event.code === "KeyX")) handlersRef.current.onHostCopy();
     };
     const onKeyDown = onKey(true);
@@ -140,6 +155,8 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
     for (const [type, listener] of documentListeners) doc.addEventListener(type, listener);
     return () => {
       clearTimeout(pasteTimer);
+      // Leaving the viewer mid-drag must not leave the host's mouse button held down.
+      if (pressed > 0) send({ type: "up", ...lastPoint, button: lastButton });
       for (const [type, listener] of listeners) element.removeEventListener(type, listener);
       for (const [type, listener] of documentListeners) doc.removeEventListener(type, listener);
     };

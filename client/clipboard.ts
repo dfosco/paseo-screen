@@ -26,6 +26,7 @@ export function useHostClipboard(active: boolean) {
   const readRef = useRef(read);
   readRef.current = read;
   const known = useRef<number | null>(null);
+  const pasted = useRef<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const supported = hasWebClipboard();
 
@@ -51,6 +52,9 @@ export function useHostClipboard(active: boolean) {
         const clipboard = await readRef.current({});
         if (onlyIfChanged && clipboard.changeCount === known.current) return false;
         known.current = clipboard.changeCount;
+        // A change that is only our own paste landing is not a host copy; keep waiting for the real one.
+        if (onlyIfChanged && clipboard.text !== undefined && clipboard.text === pasted.current) return false;
+        pasted.current = null;
         if (clipboard.text === undefined) {
           setMessage("Host clipboard has no text");
           return true;
@@ -66,23 +70,30 @@ export function useHostClipboard(active: boolean) {
     [supported],
   );
 
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  const later = useCallback((delay: number, run: () => void) => {
+    const timer = setTimeout(() => {
+      timers.current.delete(timer);
+      run();
+    }, delay);
+    timers.current.add(timer);
+  }, []);
+
   const afterHostCopy = useCallback(() => {
     let attempt = 0;
     const delays = [150, 350, 700, 1200];
     const check = () => {
       void pull(true).then((done) => {
-        if (!done && ++attempt < delays.length) setTimeout(check, delays[attempt]! - delays[attempt - 1]!);
+        if (!done && ++attempt < delays.length) later(delays[attempt]! - delays[attempt - 1]!, check);
       });
     };
-    setTimeout(check, delays[0]);
-  }, [pull]);
+    later(delays[0]!, check);
+  }, [pull, later]);
 
-  /** Records that the host clipboard was just set from here, so it is not mirrored back. */
-  const notePasted = useCallback(() => {
-    void readRef.current({}).then(
-      (clipboard) => (known.current = clipboard.changeCount),
-      () => undefined,
-    );
+  /** Records text just pasted on the host from here, so that change is not mirrored back as a copy. */
+  const notePasted = useCallback((text: string) => {
+    pasted.current = text;
   }, []);
 
   return { supported, message, pull: () => void pull(false), afterHostCopy, notePasted, setMessage };

@@ -28,10 +28,6 @@ export const KEY = {
   right: 124,
   down: 125,
   up: 126,
-  q: 12,
-  w: 13,
-  c: 8,
-  v: 9,
 } as const;
 
 export interface ModifierState {

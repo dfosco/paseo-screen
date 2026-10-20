@@ -9,6 +9,7 @@
 
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -55,14 +56,22 @@ struct DisplayInfo {
 }
 
 /// Monitor names as shown in System Settings, keyed by display ID.
+/// Runs AppKit and Text Input Sources calls on the main thread, where they belong.
+/// The main thread runs NSApplication's run loop, which also keeps NSScreen current after hotplug.
+func onMain<T>(_ body: () -> T) -> T {
+  Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)
+}
+
 func screenNames() -> [CGDirectDisplayID: String] {
-  var names: [CGDirectDisplayID: String] = [:]
-  for screen in NSScreen.screens {
-    if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-      names[number.uint32Value] = screen.localizedName
+  onMain {
+    var names: [CGDirectDisplayID: String] = [:]
+    for screen in NSScreen.screens {
+      if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+        names[number.uint32Value] = screen.localizedName
+      }
     }
+    return names
   }
-  return names
 }
 
 func activeDisplays() -> [DisplayInfo] {
@@ -305,11 +314,20 @@ func withModifiers(_ flags: CGEventFlags, _ body: () -> Void) {
 }
 
 func typeText(_ text: String) {
-  // CGEventKeyboardSetUnicodeString accepts up to 20 UTF-16 units per event.
-  var units = Array(text.utf16)
-  while !units.isEmpty {
-    let chunk = Array(units.prefix(20))
-    units.removeFirst(chunk.count)
+  // CGEventKeyboardSetUnicodeString accepts up to 20 UTF-16 units per event. Chunks are cut on
+  // whole characters so an emoji or other multi-unit character is never split across events.
+  var chunks: [[UniChar]] = []
+  var current: [UniChar] = []
+  for character in text {
+    let units = Array(String(character).utf16)
+    if !current.isEmpty && current.count + units.count > 20 {
+      chunks.append(current)
+      current = []
+    }
+    current.append(contentsOf: units)
+  }
+  if !current.isEmpty { chunks.append(current) }
+  for chunk in chunks {
     for down in [true, false] {
       guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: down) else { continue }
       event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
@@ -349,6 +367,7 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
       let button = mouseButton(event["button"])
       let location = point(event, in: display)
       let count = max(1, (event["count"] as? NSNumber)?.intValue ?? 1)
+      pressedButton = nil
       postMouse(.mouseMoved, at: location, button: button)
       for index in 1...count {
         postMouse(mouseTypes(button).down, at: location, button: button, clickCount: index, flags: flags)
@@ -356,12 +375,17 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
       }
     case "scroll":
       if event["x"] != nil { postMouse(.mouseMoved, at: point(event, in: display), button: .left) }
-      let dx = Int32((event["dx"] as? NSNumber)?.doubleValue ?? 0)
-      let dy = Int32((event["dy"] as? NSNumber)?.doubleValue ?? 0)
+      // Clamped so an extreme delta can never overflow Int32 and crash the helper.
+      let dx = Int32(min(10_000, max(-10_000, (event["dx"] as? NSNumber)?.doubleValue ?? 0)))
+      let dy = Int32(min(10_000, max(-10_000, (event["dy"] as? NSNumber)?.doubleValue ?? 0)))
       CGEvent(scrollWheelEvent2Source: eventSource, units: .pixel, wheelCount: 2, wheel1: -dy, wheel2: -dx, wheel3: 0)?
         .post(tap: .cghidEventTap)
     case "key":
-      guard let code = (event["keyCode"] as? NSNumber)?.uint16Value else { continue }
+      // Either a physical key code, or a character resolved on the host's layout.
+      let resolved = (event["char"] as? String).flatMap(\.first).flatMap(keyCode(for:))
+      guard let code = resolved ?? (event["keyCode"] as? NSNumber)?.uint16Value else {
+        throw HelperError("no key for \(event["char"] ?? event["keyCode"] ?? "nil") on this keyboard layout")
+      }
       withModifiers(flags) {
         if let down = event["down"] as? Bool {
           postKey(code, down: down, flags: flags)
@@ -378,9 +402,10 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
       pasteboard.clearContents()
       pasteboard.setString((event["text"] as? String) ?? "", forType: .string)
       usleep(30_000)
+      let v = keyCode(for: "v") ?? 9
       withModifiers(.maskCommand) {
-        postKey(9, down: true, flags: .maskCommand)
-        postKey(9, down: false, flags: .maskCommand)
+        postKey(v, down: true, flags: .maskCommand)
+        postKey(v, down: false, flags: .maskCommand)
       }
     default:
       throw HelperError("unknown input event: \(event["type"] ?? "nil")")
@@ -390,6 +415,29 @@ func handleInput(_ request: [String: Any]) throws -> [String: Any] {
   // Tells the client which display the pointer ended on, so the view can follow a drag to another display.
   if let lastPointer, let landed = displayContaining(lastPointer) { result["pointerDisplay"] = Int(landed.id) }
   return result
+}
+
+/// Virtual key code that types `character` (unshifted) on the host's current keyboard layout,
+/// so shortcuts like Cmd+V and Cmd+W work on Dvorak, AZERTY and other layouts.
+func keyCode(for character: Character) -> CGKeyCode? {
+  onMain {
+    guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+          let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+    let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
+    let target = String(character).lowercased()
+    return data.withUnsafeBytes { raw -> CGKeyCode? in
+      guard let layout = raw.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return nil }
+      for code in 0..<128 {
+        var deadKeys: UInt32 = 0
+        var length = 0
+        var chars = [UniChar](repeating: 0, count: 4)
+        let status = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+                                    OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, chars.count, &length, &chars)
+        if status == noErr, length > 0, String(utf16CodeUnits: chars, count: length) == target { return CGKeyCode(code) }
+      }
+      return nil
+    }
+  }
 }
 
 // MARK: - Clipboard
@@ -471,4 +519,6 @@ Thread.detachNewThread {
   exit(0)
 }
 
-dispatchMain()
+// An AppKit run loop (with no Dock icon) keeps NSScreen up to date and services main-queue work.
+NSApplication.shared.setActivationPolicy(.prohibited)
+NSApplication.shared.run()

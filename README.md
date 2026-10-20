@@ -38,6 +38,8 @@ It was built for the moments when an agent on a remote Mac needs a human: watchi
 
 If a permission is missing, the viewer says which one and offers a button that shows the macOS prompt on the host. Someone has to be at the host Mac to approve it once.
 
+macOS gives these permissions to the app that started the Paseo daemon. That is normally the Paseo desktop app. If you run the daemon some other way, for example `paseo start` from a terminal, grant the permissions to that app (such as Terminal) instead.
+
 ## How it works
 
 ```
@@ -54,7 +56,7 @@ Paseo client (laptop, web, phone)                    Host Mac (Paseo daemon)
 
 ## Security
 
-Anyone paired with the host can see and control its screen while the plugin is enabled. That is the same trust that pairing already grants for running agents and terminals on that machine. Traffic stays inside the Paseo connection; the plugin opens no ports and talks to no other service. Turn the plugin off with `paseo plugin disable paseo-screen` when you don't need it.
+Anyone paired with the host can see and control its screen while the plugin is enabled. That is the same trust that pairing already grants for running agents and terminals on that machine. Traffic stays inside the Paseo connection; the plugin opens no ports and talks to no other service. View-only mode is a setting in each viewer, not a lock on the host: any paired client can still send input. Turn the plugin off with `paseo plugin disable paseo-screen` when you don't need it.
 
 ## Limitations
 

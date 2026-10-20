@@ -70,7 +70,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   const pasteOnHost = useCallback(
     (text: string) => {
       send({ type: "paste", text });
-      clipboard.notePasted();
+      clipboard.notePasted(text);
     },
     [send, clipboard.notePasted],
   );
@@ -199,8 +199,8 @@ function KeyBar({ styles, compact, send, clipboard }: {
       <ToolButton styles={styles} label="⌫" onPress={key(KEY.backspace)} />
       <ToolButton styles={styles} label="⌘Tab" onPress={key(KEY.tab, ["cmd"])} />
       <ToolButton styles={styles} label="⌘Space" onPress={key(KEY.space, ["cmd"])} />
-      <ToolButton styles={styles} label="⌘W" onPress={key(KEY.w, ["cmd"])} />
-      <ToolButton styles={styles} label="⌘Q" onPress={key(KEY.q, ["cmd"])} />
+      <ToolButton styles={styles} label="⌘W" onPress={() => send({ type: "key", char: "w", modifiers: ["cmd"] })} />
+      <ToolButton styles={styles} label="⌘Q" onPress={() => send({ type: "key", char: "q", modifiers: ["cmd"] })} />
       <ToolButton styles={styles} label="◀ Space" onPress={key(KEY.left, ["ctrl"])} />
       <ToolButton styles={styles} label="Space ▶" onPress={key(KEY.right, ["ctrl"])} />
       <ToolButton styles={styles} label="Mission Control" onPress={key(KEY.up, ["ctrl"])} />

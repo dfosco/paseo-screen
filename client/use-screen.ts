@@ -1,6 +1,6 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PixelRatio } from "react-native";
+import { AppState, PixelRatio } from "react-native";
 import { frameRpc, inputRpc, type ScreenDisplay, type ScreenInputEvent } from "../shared/rpc";
 
 export interface Quality {
@@ -41,7 +41,11 @@ function median(values: number[]): number {
  * Polls the host for JPEG frames while `active`. Unchanged frames come back without image data.
  * Frames are sized to the viewer (`viewWidth` in points), so small screens download far less.
  */
-export function useFrames(active: boolean, displayId: number | undefined, quality: Quality, viewWidth: number): FrameState {
+export function useFrames(requested: boolean, displayId: number | undefined, quality: Quality, viewWidth: number): FrameState {
+  // Stop capturing while the app is in the background (a hidden tab or a backgrounded phone app).
+  const [appState, setAppState] = useState(AppState.currentState);
+  useEffect(() => AppState.addEventListener("change", setAppState).remove, []);
+  const active = requested && appState !== "background";
   const frame = useRpc(frameRpc);
   const frameRef = useRef(frame);
   frameRef.current = frame;
@@ -84,7 +88,10 @@ export function useFrames(active: boolean, displayId: number | undefined, qualit
         // Replies can arrive out of order; never replace a newer frame with an older one.
         if (sequence > appliedSequence) {
           appliedSequence = sequence;
-          since = result.hash;
+          // "Unchanged" only means equal to the hash this request was sent with. Another reply may have
+          // changed the picture since, so only a reply carrying image data moves `since`; a stale
+          // "unchanged" leaves it alone and the next request fetches the real frame.
+          if (result.jpeg) since = result.hash;
           setState((previous) => ({
             uri: result.jpeg ? `data:image/jpeg;base64,${result.jpeg}` : previous.uri,
             display: result.display,
@@ -140,7 +147,8 @@ export function useInputQueue(
     sending.current = true;
     try {
       while (queue.current.length > 0) {
-        const events = queue.current.splice(0, queue.current.length);
+        // The RPC accepts at most 200 events per call.
+        const events = queue.current.splice(0, 200);
         try {
           const requested = displayRef.current;
           const result = await inputRef.current({ display: requested, events });
@@ -163,7 +171,8 @@ export function useInputQueue(
       if (event.type === "move" && last?.type === "move") {
         queue.current[queue.current.length - 1] = event;
       } else if (event.type === "scroll" && last?.type === "scroll") {
-        queue.current[queue.current.length - 1] = { ...event, dx: last.dx + event.dx, dy: last.dy + event.dy };
+        const clamp = (value: number) => Math.max(-10_000, Math.min(10_000, value));
+        queue.current[queue.current.length - 1] = { ...event, dx: clamp(last.dx + event.dx), dy: clamp(last.dy + event.dy) };
       } else {
         queue.current.push(event);
       }
