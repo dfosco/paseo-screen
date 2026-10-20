@@ -2,7 +2,10 @@
   "id": "paseo-screen",
   "name": "Host screen",
   "icon": "assets/icon.png",
-  "media": [],
+  "media": [
+    "images/desktop-viewer.jpg",
+    "images/remote-editing.jpg"
+  ],
   "requirements": {
     "paseo": ">=0.12.0"
   }

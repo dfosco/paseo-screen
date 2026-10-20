@@ -316,22 +316,42 @@ func withModifiers(_ flags: CGEventFlags, _ body: () -> Void) {
 func typeText(_ text: String) {
   // CGEventKeyboardSetUnicodeString accepts up to 20 UTF-16 units per event. Chunks are cut on
   // whole characters so an emoji or other multi-unit character is never split across events.
-  var chunks: [[UniChar]] = []
+  // Line breaks and tabs are sent as real Return and Tab presses: inside a unicode string, apps
+  // treat a line break as Return and drop the rest of that event's text.
+  enum Piece { case text([UniChar]), key(CGKeyCode) }
+  var pieces: [Piece] = []
   var current: [UniChar] = []
+  func flush() {
+    if !current.isEmpty { pieces.append(.text(current)) }
+    current = []
+  }
   for character in text {
-    let units = Array(String(character).utf16)
-    if !current.isEmpty && current.count + units.count > 20 {
-      chunks.append(current)
-      current = []
+    if character == "\n" || character == "\r" || character == "\r\n" {
+      flush()
+      pieces.append(.key(36))
+      continue
     }
+    if character == "\t" {
+      flush()
+      pieces.append(.key(48))
+      continue
+    }
+    let units = Array(String(character).utf16)
+    if current.count + units.count > 20 { flush() }
     current.append(contentsOf: units)
   }
-  if !current.isEmpty { chunks.append(current) }
-  for chunk in chunks {
-    for down in [true, false] {
-      guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: down) else { continue }
-      event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
-      event.post(tap: .cghidEventTap)
+  flush()
+  for piece in pieces {
+    switch piece {
+    case .key(let code):
+      postKey(code, down: true, flags: [])
+      postKey(code, down: false, flags: [])
+    case .text(let chunk):
+      for down in [true, false] {
+        guard let event = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: down) else { continue }
+        event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+        event.post(tap: .cghidEventTap)
+      }
     }
     usleep(2000)
   }

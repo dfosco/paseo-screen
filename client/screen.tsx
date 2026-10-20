@@ -176,8 +176,16 @@ function KeyBar({ styles, compact, send, clipboard }: {
   const [text, setText] = useState("");
   const key = (keyCode: number, modifiers: ScreenModifier[] = []) => () => send({ type: "key", keyCode, modifiers });
   const submit = (withEnter: boolean) => {
-    // Text events carry at most 10,000 characters each.
-    for (let start = 0; start < text.length; start += 10_000) send({ type: "text", text: text.slice(start, start + 10_000) });
+    // Text events carry at most 10,000 UTF-16 units each; split on code points so no emoji is cut in half.
+    let chunk = "";
+    for (const codePoint of text) {
+      if (chunk.length + codePoint.length > 10_000) {
+        send({ type: "text", text: chunk });
+        chunk = "";
+      }
+      chunk += codePoint;
+    }
+    if (chunk) send({ type: "text", text: chunk });
     if (withEnter) send({ type: "key", keyCode: KEY.enter });
     setText("");
   };
