@@ -4,7 +4,7 @@ A [Paseo](https://paseo.sh) plugin that lets you see and control the screen of t
 
 It was built for the moments when an agent on a remote Mac needs a human: watching a Playwright run, clicking through a permission dialog, or checking what is actually on screen.
 
-![Viewing the host's second display from the Paseo desktop app](images/desktop-viewer.jpg)
+![Controlling the host Mac from Paseo on a laptop](images/laptop-client.jpg)
 
 ## Features
 
@@ -15,6 +15,8 @@ It was built for the moments when an agent on a remote Mac needs a human: watchi
 - Multiple displays: each one is listed by name, the last choice is remembered, and a drag that leaves the picture continues onto the neighbouring display.
 - Phones: tap to click, long-press to right-click, pinch to zoom, drag to pan, and a Rotate button that turns the picture sideways.
 - View-only mode, and Fast / Balanced / Sharp quality presets.
+
+![Viewing the host's second display](images/desktop-viewer.jpg)
 
 ![Typing and selecting text on the host from another computer](images/remote-editing.jpg)
 

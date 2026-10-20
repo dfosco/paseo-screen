@@ -3,6 +3,7 @@
   "name": "Host screen",
   "icon": "assets/icon.png",
   "media": [
+    "images/laptop-client.jpg",
     "images/desktop-viewer.jpg",
     "images/remote-editing.jpg"
   ],
