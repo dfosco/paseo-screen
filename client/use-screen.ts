@@ -63,6 +63,11 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
   const wake = useCallback(() => {
     wakeNext.current = true;
   }, []);
+  // Only opening or resuming the viewer asks for a wake. Restarts of the frame loop for other
+  // reasons (display list, size, quality) must not, or a sleeping host would be woken repeatedly.
+  useEffect(() => {
+    if (active) wakeNext.current = true;
+  }, [active]);
 
   // Rounded to 160 px steps so resizing the viewer does not restart the loop on every pixel.
   const wanted = viewWidth > 0 ? Math.ceil((viewWidth * Math.min(PixelRatio.get(), 2)) / 160) * 160 : quality.maxWidth;
@@ -72,7 +77,6 @@ export function useFrames(requested: boolean, displayId: number | undefined, qua
     if (!active) return;
     let cancelled = false;
     let since: string | undefined;
-    wakeNext.current = true;
     let nextSequence = 0;
     let appliedSequence = -1;
     const timers = new Set<ReturnType<typeof setTimeout>>();

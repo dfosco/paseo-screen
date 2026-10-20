@@ -2,7 +2,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, Text, TextInput, View, type LayoutChangeEvent } from "react-native";
 import { chooseDisplayRpc, requestPermissionsRpc, statusRpc, type ScreenDisplay, type ScreenInputEvent, type ScreenModifier, type ScreenStatus } from "../shared/rpc";
 import { readLocalClipboard, useHostClipboard } from "./clipboard";
@@ -29,7 +29,11 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   const chooseDisplayOnHost = useRpc(chooseDisplayRpc);
   const [inputError, setInputError] = useState<string | null>(null);
 
-  const displays = status.data?.displays ?? [];
+  // A sleeping host lists no active displays; keep the last known list so the chosen display
+  // (and the frame loop keyed on it) stays put until the host is awake again.
+  const lastDisplays = useRef<ScreenDisplay[]>([]);
+  if (status.data?.displays.length) lastDisplays.current = status.data.displays;
+  const displays = lastDisplays.current;
   // This viewer's choice, else the display last chosen on this host, else the main display.
   const display =
     displays.find((candidate) => candidate.id === chosenDisplay) ??
@@ -48,6 +52,8 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
     if (displays.length < 2) return;
     const index = displays.findIndex((candidate) => candidate.id === displayId);
     chooseDisplay(displays[(index + 1) % displays.length]!.id);
+    // Choosing a display is an explicit action, so it may wake a sleeping host.
+    frames.wake();
   };
   const canCapture = status.data?.screenRecording === true;
   const [stage, setStage] = useState({ width: 0, height: 0 });

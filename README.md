@@ -68,7 +68,7 @@ Anyone paired with the host can see and control its screen while the plugin is e
 - Only Mac hosts are supported. Any Paseo client can view.
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.
 - Granting the two macOS permissions needs someone physically at the host once.
-- The plugin doesn't stop the host from sleeping or locking on its own schedule. Opening the viewer, clicking or typing, or the **Wake display** button wakes the display, and you unlock it by typing your password. Touch ID isn't available remotely.
+- The plugin doesn't stop the host from sleeping or locking on its own schedule. Opening the viewer, using the mouse or keyboard on the picture, or the **Wake display** button wakes the display, and you unlock it by typing your password. Touch ID isn't available remotely.
 - Shortcuts your own computer or the Paseo app handle first (⌘Tab, ⌘Space, ⌘W, ⌘Q) need the key bar buttons.
 - Clipboard sync is text only, and only on desktop and web clients.
 - Keys are sent by physical position, so both computers should use the same keyboard layout.
