@@ -30,12 +30,13 @@ It was built for the moments when an agent on a remote Mac needs a human: watchi
 ## Install
 
 1. Enable plugins on the host by setting `"pluginsEnabled": true` in `~/.paseo/config.json`, then run `paseo reload`.
-2. Install the plugin on the host:
+2. Install the plugin on the host from the [Paseo plugin directory](https://paseo.sh/plugins/kevguy/screen):
 
    ```bash
-   paseo plugin install npm:@kevlai22/paseo-screen
-   # or from GitHub
-   paseo plugin install git:kevguy/paseo-screen
+   paseo plugin add kevguy/screen
+   # or straight from npm or GitHub
+   paseo plugin add npm:@kevlai22/paseo-screen
+   paseo plugin add git:kevguy/paseo-screen
    ```
 
 3. On the host Mac, open System Settings → Privacy & Security and turn on **Paseo** under both **Screen Recording** and **Accessibility**. Quit and reopen Paseo.

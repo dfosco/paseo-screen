@@ -1,6 +1,6 @@
 {
   "name": "@kevlai22/paseo-screen",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "See and control the Paseo host Mac screen from any paired Paseo client, over the existing Paseo connection.",
   "type": "module",
   "license": "MIT",

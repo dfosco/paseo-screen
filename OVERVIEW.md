@@ -17,8 +17,9 @@ Open **Screen** for the host from the sidebar, or search "host screen" in the co
 - The key bar sends shortcuts your own computer keeps for itself: Cmd+Tab, Cmd+Space, Cmd+W, Cmd+Q, switching Spaces, Mission Control and App windows.
 - Text clipboard works both ways on desktop and web clients. Cmd+V pastes your clipboard on the host, and Cmd+C on the host copies back to you. **Copy from host** and **Paste to host** buttons cover menu copies.
 - With several displays, the display button names each one and switches between them. The last choice is remembered on the host.
-- **View only** turns input off. **Fast, Balanced, Sharp** trade resolution for frame rate.
+- **View only** turns input off for the viewer you are using. **Fast, Balanced, Sharp** trade resolution for frame rate.
+- If the host's display is asleep, opening the viewer or using the mouse or keyboard on it wakes the display. A locked host shows its lock screen; type your password and press Return to unlock it. Watching alone never wakes the host, so it still sleeps and locks on its own schedule.
 
 ## Permissions and limits
 
-Anyone paired with this Paseo host can see and control the host Mac while the plugin is enabled. That is the same trust that pairing already grants for running agents and terminals. Nothing leaves the Paseo connection. The plugin sends no audio, transfers no files and syncs text only, not images. Keys are sent by physical position, so both computers should use the same keyboard layout. Only Mac hosts are supported.
+Anyone paired with this Paseo host can see and control the host Mac while the plugin is enabled. That is the same trust that pairing already grants for running agents and terminals. View only is a setting in each viewer, not a lock on the host: other paired clients keep control. To stop all remote viewing and control, disable the plugin on the host. Nothing leaves the Paseo connection. The plugin sends no audio, transfers no files and syncs text only, not images. Keys are sent by physical position, so both computers should use the same keyboard layout. Only Mac hosts are supported.

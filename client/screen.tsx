@@ -29,15 +29,18 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   const chooseDisplayOnHost = useRpc(chooseDisplayRpc);
   const [inputError, setInputError] = useState<string | null>(null);
 
-  // A sleeping host lists no active displays; keep the last known list so the chosen display
-  // (and the frame loop keyed on it) stays put until the host is awake again.
-  const lastDisplays = useRef<ScreenDisplay[]>([]);
-  if (status.data?.displays.length) lastDisplays.current = status.data.displays;
-  const displays = lastDisplays.current;
+  // A status reply with an error (a helper timeout or restart) says nothing reliable, and a sleeping
+  // host lists no active displays. Keep the last reply that does, so neither turns capture off and on
+  // (which would ask for a wake) nor moves the chosen display while the host is asleep.
+  const lastGood = useRef<ScreenStatus | null>(null);
+  if (status.data && !status.data.error) lastGood.current = status.data;
+  const lastAwake = useRef<ScreenStatus | null>(null);
+  if (status.data && !status.data.error && status.data.displays.length > 0) lastAwake.current = status.data;
+  const displays = lastAwake.current?.displays ?? [];
   // This viewer's choice, else the display last chosen on this host, else the main display.
   const display =
     displays.find((candidate) => candidate.id === chosenDisplay) ??
-    displays.find((candidate) => candidate.id === status.data?.preferredDisplay) ??
+    displays.find((candidate) => candidate.id === lastAwake.current?.preferredDisplay) ??
     displays.find((candidate) => candidate.main) ??
     displays[0];
   const displayId = display?.id;
@@ -55,7 +58,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
     // Choosing a display is an explicit action, so it may wake a sleeping host.
     frames.wake();
   };
-  const canCapture = status.data?.screenRecording === true;
+  const canCapture = lastGood.current?.screenRecording === true;
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [rotated, setRotated] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -70,7 +73,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   }, [frameAspect]);
   // After a drag carries the pointer onto another display, show that display.
   const send = useInputQueue(displayId, setInputError, chooseDisplay);
-  const controlling = control && status.data?.accessibility === true;
+  const controlling = control && lastGood.current?.accessibility === true;
 
   const clipboard = useHostClipboard(controlling);
   const pasteOnHost = useCallback(
