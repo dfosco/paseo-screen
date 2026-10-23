@@ -14,7 +14,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
 - Two-way text clipboard on desktop and web clients. ⌘V pastes your clipboard on the host, and ⌘C on the host copies back to you. With a Linux host, use Ctrl from a Windows or Linux client; a Mac client's ⌘ works there too.
 - Multiple displays: each one is listed by name, the last choice is remembered, and a drag that leaves the picture continues onto the neighbouring display.
 - Phones: tap to click, long-press to right-click, pinch to zoom, drag to pan, and a Rotate button that turns the picture sideways.
-- Wakes the host's display when you open the viewer, and shows the lock screen if the host is locked so you can type your password to unlock it.
+- Wakes the host's display when you open the viewer, and shows the lock screen if the host is locked so you can type your password to unlock it (except on GNOME Wayland, which stops sharing while locked).
 - View-only mode, and Fast / Balanced / Sharp quality presets.
 
 ![Viewing the host's second display](images/desktop-viewer.jpg)
@@ -71,7 +71,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
      sudo pacman -S gcc libx11 libxext libxtst libxrandr libxfixes libjpeg-turbo
      ```
 
-     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. A daemon started outside the desktop session with only `DISPLAY` set (for example a systemd unit with `DISPLAY=:0`) can end up on a Wayland desktop's XWayland server and show a black picture; without `DISPLAY`, the plugin finds a logged-in Wayland desktop through logind and uses the portals instead.
+     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. If the daemon runs some other way, see [Headless and always-on Linux hosts](#headless-and-always-on-linux-hosts).
    - **Windows (experimental):** nothing to prepare. Paseo has to run in the signed-in desktop session, as the Paseo desktop app does. Windows doesn't let normal apps see or control the lock screen, sign-in screen or UAC prompts, so those have to be handled at the PC, and apps running as administrator ignore input from the plugin.
 4. In any Paseo client, open **Screen · _host name_** from the sidebar, or search "host screen" in the command center.
 
@@ -79,19 +79,103 @@ If a permission is missing on a Mac, the viewer says which one and offers a butt
 
 macOS gives these permissions to the app that started the Paseo daemon. That is normally the Paseo desktop app. If you run the daemon some other way, for example `paseo start` from a terminal, grant the permissions to that app (such as Terminal) instead.
 
+## Headless and always-on Linux hosts
+
+The plugin shares whichever desktop the Paseo daemon can reach. The Paseo desktop app runs inside your desktop session, so it shares that one. A daemon started some other way, such as a systemd user service or `paseo daemon` over SSH, picks a desktop from its environment:
+
+- **`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` set:** the Wayland desktop, through the desktop portals.
+- **`DISPLAY` set** (and `XDG_SESSION_TYPE` not `wayland`): that X display.
+- **Neither:** the plugin asks logind for the user's graphical session and uses it if it is Wayland. An X11 session can't be found this way, because the helper needs its `DISPLAY`.
+
+Restart the daemon after changing its environment. A daemon with only `DISPLAY=:0` set on a Wayland desktop reaches the XWayland server, which shows a black picture, so leave `DISPLAY` out for Wayland.
+
+### Sharing the physical screen on Wayland
+
+This works while someone is logged in to the desktop and the screen is unlocked. On a machine nobody sits at, that is hard to guarantee:
+
+- **Logging in.** After a reboot nobody is logged in until someone signs in at the machine, and the viewer reports that there is no desktop session. Automatic login (on GNOME, Settings → System → Users) avoids that, but leaves the machine signed in for anyone who picks it up.
+- **The lock screen.** GNOME ends screen sharing when the screen locks and refuses to start it while locked, so a locked GNOME host can't be unlocked from the viewer. The approval is kept: once someone unlocks the screen at the host, the next viewer resumes without a dialog. Turning off automatic screen lock (Settings → Privacy & Security → Screen Lock) keeps an unattended machine shareable, with the same trade-off.
+- **Stopping sharing.** Stopping sharing from the desktop's sharing indicator drops the approval, so sharing stays off until someone at the host approves the dialog again.
+- **A laptop with its lid closed** and no external monitor is untested.
+
+### A virtual desktop for headless machines
+
+A virtual X display avoids all of that. It needs no login, no lock screen and no approval, and it works with the lid closed or no monitor at all. It is a separate desktop, not what the physical screen shows; apps the daemon's agents open appear there too. This setup runs on an Ubuntu 26.04 home server with Xvfb and XFCE. Install `xvfb`, `xfce4` and `dbus-x11`, plus the X11 packages from Install, step 3, then add two systemd user services:
+
+```ini
+# ~/.config/systemd/user/virtual-display.service
+[Unit]
+Description=Virtual X display :10
+
+[Service]
+ExecStart=/usr/bin/Xvfb :10 -screen 0 1920x1080x24 +extension RANDR -nolisten tcp
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/virtual-desktop.service
+[Unit]
+Description=XFCE on the virtual display :10
+Requires=virtual-display.service
+After=virtual-display.service
+
+[Service]
+Environment=DISPLAY=:10
+Environment=XDG_SESSION_TYPE=x11
+Environment=XDG_CURRENT_DESKTOP=XFCE
+ExecStartPre=/bin/sh -c "for i in $(seq 50); do [ -e /tmp/.X11-unix/X10 ] && exit 0; sleep 0.2; done; exit 1"
+ExecStart=/usr/bin/dbus-run-session /usr/bin/startxfce4
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then run the Paseo daemon with `DISPLAY=:10` and `XDG_SESSION_TYPE=x11` in its environment (`XDG_SESSION_TYPE` matters because a GNOME login passes `wayland` to user services), for example in its own user service:
+
+```ini
+# ~/.config/systemd/user/paseo-daemon.service
+[Unit]
+Description=Paseo daemon
+Wants=virtual-display.service
+After=network-online.target virtual-display.service
+
+[Service]
+Environment=DISPLAY=:10
+Environment=XDG_SESSION_TYPE=x11
+ExecStart=/opt/Paseo/resources/bin/paseo daemon run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now virtual-display virtual-desktop paseo-daemon
+loginctl enable-linger "$USER"   # keep user services running without a login
+```
+
+Set `PATH` in the daemon's service too if your agent CLIs live outside the default path (for example in `~/.local/bin` or under nvm). The viewer shows no lock banner for virtual displays (Xvfb, Xvnc, Xephyr), because the session's lock screen belongs to the physical desktop, not to them.
+
 ## How it works
 
 ```
 Paseo client (laptop, web, phone)                    Host (Paseo daemon)
   Host screen view  ── plugin RPC over Paseo relay ──▶  plugin server
-   - polls screen.frame, two in flight                   ├─ helper #1: ScreenCaptureKit → JPEG
+   - polls screen.frame, two in flight                   ├─ helper #1: screen capture → JPEG
    - sends screen.input batches                          └─ helper #2: mouse and keyboard
                                                          macOS: ScreenCaptureKit and CGEvent
                                                          Linux on X11: XShm, XTest, XRandR, XFixes, libjpeg
                                                          Linux on Wayland: desktop portals, PipeWire, libjpeg
 ```
 
-- `helper/main.swift` (macOS), `helper/linux.c` (Linux) and `helper/windows.cs` (Windows, experimental) are small native helpers speaking the same line-delimited JSON. The plugin server embeds all three sources, compiles the one for its platform into `~/Library/Caches/paseo-screen/<hash>/` on macOS, `~/.cache/paseo-screen/<hash>/` on Linux or `%LOCALAPPDATA%\paseo-screen\<hash>\` on Windows, and runs two copies so input never waits behind a frame capture.
+- `helper/main.swift` (macOS), `helper/linux.c` (Linux) and `helper/windows.cs` (Windows, experimental) are small native helpers speaking the same line-delimited JSON. The plugin server embeds all three sources, compiles the one for its platform into `~/Library/Caches/paseo-screen/<hash>/` on macOS, `~/.cache/paseo-screen/<hash>/` on Linux or `%LOCALAPPDATA%\paseo-screen\<hash>\` on Windows, and runs two copies so input never waits behind a frame capture. On Wayland one copy does both, because each process would need its own portal session and approval; it answers frames on a thread of their own.
 - The Windows helper captures each monitor with GDI and sends input with `SendInput`. Keys are pressed by scan code, so they match the physical positions the other hosts use; typed text arrives as Unicode, and a Mac client's ⌘ is sent as Ctrl.
 - Input carries macOS key codes, which name physical key positions. The Linux helper presses the key in the same position, and treats `cmd` as the Super key. A Mac client's ⌘ is sent as Ctrl to a Linux host, so ⌘C, ⌘V and other shortcuts do what you expect there.
 - macOS grants Screen Recording and Accessibility to Paseo as the responsible app, so rebuilding the helper does not need new permissions.
@@ -105,6 +189,7 @@ Anyone paired with the host can see and control its screen while the plugin is e
 ## Limitations
 
 - Mac hosts and Linux hosts on Wayland or X11 are supported. Windows hosts are experimental and untested. Any Paseo client can view. Wayland support has been tested on GNOME 50 (Ubuntu 26.04) with one display, including a 4K panel at 200% scaling; multiple displays and other Wayland desktops (KDE, Sway, Hyprland) are untested.
+- On GNOME Wayland, locking the screen ends sharing, so a locked host has to be unlocked at the machine. Sharing resumes once it is unlocked. See [Headless and always-on Linux hosts](#headless-and-always-on-linux-hosts).
 - On Wayland, characters the host's keyboard layout lacks (✓, emoji, é on a US layout) cannot be typed; the desktop drops them. Paste them instead (⌘V or Ctrl+V), which works for any text.
 - On GNOME with display scaling, the pointer is placed with an absolute move near the corner followed by a relative move, because GNOME reads the portal's absolute positions as physical pixels. Other Wayland desktops get plain absolute moves.
 - On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` with the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.

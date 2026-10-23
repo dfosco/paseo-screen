@@ -18,7 +18,7 @@ Open **Screen** for the host from the sidebar, or search "host screen" in the co
 - Text clipboard works both ways on desktop and web clients. Cmd+V pastes your clipboard on the host, and Cmd+C on the host copies back to you. With a Linux host, Windows and Linux clients use Ctrl+V and Ctrl+C instead, and terminals there need Shift added (Ctrl+Shift+V, or Cmd+Shift+V from a Mac). **Copy from host** and **Paste to host** buttons cover menu copies.
 - With several displays, the display button names each one and switches between them. The last choice is remembered on the host.
 - **View only** turns input off for the viewer you are using. **Fast, Balanced, Sharp** trade resolution for frame rate.
-- If the host's display is asleep, opening the viewer or using the mouse or keyboard on it wakes the display. A locked host shows its lock screen; type your password and press Return to unlock it. Watching alone never wakes the host, so it still sleeps and locks on its own schedule.
+- If the host's display is asleep, opening the viewer or using the mouse or keyboard on it wakes the display. A locked host shows its lock screen; type your password and press Return to unlock it. GNOME on Wayland is the exception: it stops sharing while the screen is locked, so someone has to unlock it at the host, and sharing then resumes. Watching alone never wakes the host, so it still sleeps and locks on its own schedule.
 
 ## Permissions and limits
 

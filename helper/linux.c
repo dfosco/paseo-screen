@@ -611,7 +611,8 @@ static bool virtual_display(void) {
   cached = 0;
   const char *display = getenv("DISPLAY");
   const char *colon = display ? strchr(display, ':') : NULL;
-  if (!colon) return false;
+  // A display on another host (localhost:10 from SSH forwarding, say) is not a local server.
+  if (!colon || (colon != display && strncmp(display, "unix:", 5))) return false;
   char wanted[32];
   snprintf(wanted, sizeof wanted, ":%.*s", (int)strcspn(colon + 1, "."), colon + 1);
   DIR *proc = opendir("/proc");
@@ -636,6 +637,48 @@ static bool virtual_display(void) {
 }
 #endif
 
+/// Runs a gdbus call on the system bus and returns its output, or false.
+static bool system_bus_call(const char *object, const char *interface, const char *property, char *output, size_t size) {
+  char command[512];
+  snprintf(command, sizeof command,
+           "gdbus call --system --timeout 1 --dest org.freedesktop.login1 --object-path %s "
+           "--method org.freedesktop.DBus.Properties.Get %s %s </dev/null 2>/dev/null",
+           object, interface, property);
+  FILE *pipe = popen(command, "r");
+  if (!pipe) return false;
+  size_t n = fread(output, 1, size - 1, pipe);
+  output[n] = 0;
+  return pclose(pipe) == 0 && n > 0;
+}
+
+/// logind's LockedHint for the user's graphical session: 1 locked, 0 unlocked, -1 unknown. GNOME
+/// sets it the moment the screen locks; the screensaver's GetActive only turns true once the screen
+/// has faded to black, and false again while the password prompt shows.
+static int session_locked_hint(void) {
+  char output[256];
+  if (!system_bus_call("/org/freedesktop/login1/user/self", "org.freedesktop.login1.User", "Display", output, sizeof output))
+    return -1;
+  // (<('2', objectpath '/org/freedesktop/login1/session/_32')>,)
+  const char *start = strstr(output, "objectpath '");
+  if (!start) return -1;
+  start += strlen("objectpath '");
+  char path[128];
+  size_t length = strspn(start, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/");
+  if (length == 0 || length >= sizeof path || start[length] != '\'') return -1;
+  memcpy(path, start, length);
+  path[length] = 0;
+  if (!system_bus_call(path, "org.freedesktop.login1.Session", "LockedHint", output, sizeof output)) return -1;
+  return strstr(output, "true") != NULL;
+}
+
+/// True while the session's lock screen is showing, asked fresh.
+static bool lock_screen_active(void) {
+  if (session_locked_hint() == 1) return true;
+  int active = screensaver_active("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver");
+  if (active < 0) active = screensaver_active("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver");
+  return active == 1;
+}
+
 /// True while the session's lock screen is showing. Checked at most every two seconds.
 static bool screen_locked(void) {
 #ifndef PASEO_WAYLAND
@@ -648,9 +691,7 @@ static bool screen_locked(void) {
   double now = now_seconds();
   if (now - checked_at >= 2) {
     checked_at = now;
-    int active = screensaver_active("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver");
-    if (active < 0) active = screensaver_active("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver");
-    locked = active == 1;
+    locked = lock_screen_active();
   }
   bool result = locked;
   pthread_mutex_unlock(&lock);
@@ -1592,6 +1633,10 @@ static bool start_running;      // a start thread is alive; it may outlive SESSI
 static bool start_closed;       // the desktop closed the session the start thread is setting up
 static Waiter *start_waiter;    // the portal reply the start thread is waiting for
 static bool auto_start = true;  // whether a saved token may start a session without a request
+// Why the desktop last closed a session of ours: the host stopped sharing, or the screen locked.
+enum { CLOSE_NONE, CLOSE_PENDING, CLOSE_STOPPED, CLOSE_LOCKED };
+static int close_kind = CLOSE_NONE;
+static bool resume_when_unlocked;  // an approved session was interrupted by the lock screen
 static char token_file[1024];
 
 static GMutex clip_lock;
@@ -1619,13 +1664,22 @@ static char *request_path(const char *token) {
 }
 
 struct Waiter {
+  gint refs;  // the caller's and the Response subscription's
   GMutex lock;
   GCond cond;
   bool done;
-  bool released;  // the Response subscription will not call back any more
   uint32_t response;
   GVariant *results;
 };
+
+static void waiter_unref(gpointer data) {
+  Waiter *waiter = data;
+  if (!g_atomic_int_dec_and_test(&waiter->refs)) return;
+  if (waiter->results) g_variant_unref(waiter->results);
+  g_mutex_clear(&waiter->lock);
+  g_cond_clear(&waiter->cond);
+  g_free(waiter);
+}
 
 /// Ends a wait with `response`, unless the reply already came. `results` is taken.
 static void finish_wait(Waiter *waiter, uint32_t response, GVariant *results) {
@@ -1649,14 +1703,6 @@ static void on_response(GDBusConnection *connection, const char *sender, const c
   finish_wait(data, response, results);
 }
 
-static void on_response_released(gpointer data) {
-  Waiter *waiter = data;
-  g_mutex_lock(&waiter->lock);
-  waiter->released = true;
-  g_cond_signal(&waiter->cond);
-  g_mutex_unlock(&waiter->lock);
-}
-
 /// Calls a portal method that answers through a Request and waits for the Response. Only the start
 /// thread calls it (the Response is delivered on the main thread). Returns 0 on success, 1 when the
 /// user cancelled, 2 for other portal failures (including the session closing meanwhile), -1 when
@@ -1666,46 +1712,46 @@ static int portal_call(const char *interface, const char *method, GVariant *para
                        gint64 timeout_us, GVariant **results, char *error_text, size_t error_size) {
   *results = NULL;
   char *path = request_path(token);
-  Waiter waiter = {0};
-  g_mutex_init(&waiter.lock);
-  g_cond_init(&waiter.cond);
+  // On the heap: GDBus may still deliver a queued Response after unsubscribing, so the
+  // subscription holds its own reference.
+  Waiter *waiter = g_new0(Waiter, 1);
+  waiter->refs = 2;
+  g_mutex_init(&waiter->lock);
+  g_cond_init(&waiter->cond);
   guint subscription = g_dbus_connection_signal_subscribe(bus, PORTAL_BUS, "org.freedesktop.portal.Request", "Response", path,
-                                                          NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_response, &waiter, on_response_released);
+                                                          NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_response, waiter, waiter_unref);
   // A session closed by the desktop answers no more requests, so its closing ends the wait.
   g_mutex_lock(&session_lock);
-  start_waiter = &waiter;
-  if (start_closed) finish_wait(&waiter, 2, NULL);
+  start_waiter = waiter;
+  if (start_closed) finish_wait(waiter, 2, NULL);
   g_mutex_unlock(&session_lock);
   GError *error = NULL;
   GVariant *reply = g_dbus_connection_call_sync(bus, PORTAL_BUS, PORTAL_PATH, interface, method, parameters, NULL,
                                                 G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
+  int code = -1;
   if (!reply) {
     snprintf(error_text, error_size, "%s.%s failed: %s", interface, method, error->message);
     g_error_free(error);
   } else {
     g_variant_unref(reply);
     gint64 deadline = g_get_monotonic_time() + timeout_us;
-    g_mutex_lock(&waiter.lock);
-    while (!waiter.done)
-      if (!g_cond_wait_until(&waiter.cond, &waiter.lock, deadline)) break;
-    g_mutex_unlock(&waiter.lock);
+    g_mutex_lock(&waiter->lock);
+    while (!waiter->done)
+      if (!g_cond_wait_until(&waiter->cond, &waiter->lock, deadline)) break;
+    code = waiter->done ? (int)waiter->response : -2;
+    if (code == 0) {
+      *results = waiter->results;
+      waiter->results = NULL;
+    }
+    // Any later Response is dropped.
+    waiter->done = true;
+    g_mutex_unlock(&waiter->lock);
   }
   g_mutex_lock(&session_lock);
   start_waiter = NULL;
   g_mutex_unlock(&session_lock);
-  // A Response already queued on the main thread may still arrive after unsubscribing; the waiter
-  // lives on this stack, so wait until GDBus lets go of it.
   g_dbus_connection_signal_unsubscribe(bus, subscription);
-  gint64 release_deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
-  g_mutex_lock(&waiter.lock);
-  while (!waiter.released)
-    if (!g_cond_wait_until(&waiter.cond, &waiter.lock, release_deadline)) break;
-  int code = !reply ? -1 : waiter.done ? (int)waiter.response : -2;
-  g_mutex_unlock(&waiter.lock);
-  if (code == 0) *results = waiter.results;
-  else if (waiter.results) g_variant_unref(waiter.results);
-  g_mutex_clear(&waiter.lock);
-  g_cond_clear(&waiter.cond);
+  waiter_unref(waiter);
   g_free(path);
   return code;
 }
@@ -1806,18 +1852,62 @@ static void name_monitors(void) {
 
 // MARK: - Wayland: session lifecycle
 
+#define STOPPED_MESSAGE "Screen sharing was stopped on the host."
+#define LOCKED_MESSAGE "The host's screen is locked. Sharing resumes once it is unlocked."
+#define ENDED_MESSAGE "Screen sharing ended on the host."
+
+static const char *closed_message(void) {
+  return close_kind == CLOSE_LOCKED ? LOCKED_MESSAGE : close_kind == CLOSE_STOPPED ? STOPPED_MESSAGE : ENDED_MESSAGE;
+}
+
+/// Runs on the main loop a moment after the desktop closed a session, once the lock screen (if
+/// that was the cause) is up. `data` is the restore token that was saved at the time.
+static gboolean classify_close(gpointer data) {
+  char *closed_token = data;
+  bool locked = lock_screen_active();
+  g_mutex_lock(&session_lock);
+  if (locked) {
+    // GNOME ends every sharing session when the screen locks. The approval stands, so sharing
+    // resumes silently once the screen is unlocked.
+    close_kind = CLOSE_LOCKED;
+    resume_when_unlocked = true;
+  } else {
+    // The host stopped sharing (from the desktop's sharing indicator, say). Sharing resumes only
+    // once someone there approves again, so the token that would skip the dialog is dropped now,
+    // before a helper restart could use it. A token from a newer approval is kept.
+    close_kind = CLOSE_STOPPED;
+    resume_when_unlocked = false;
+    char *current = read_restore_token();
+    if (closed_token && current && !strcmp(current, closed_token)) unlink(token_file);
+    g_free(current);
+  }
+  if (session_state == SESSION_NONE && !strcmp(session_error, ENDED_MESSAGE))
+    snprintf(session_error, sizeof session_error, "%s", closed_message());
+  g_mutex_unlock(&session_lock);
+  g_free(closed_token);
+  return G_SOURCE_REMOVE;
+}
+
 static void on_session_closed(GDBusConnection *connection, const char *sender, const char *path, const char *interface,
                               const char *signal, GVariant *parameters, gpointer data) {
-  // Only flagged here. The request threads tear down a published session; a session still being
-  // set up is closed by its start thread, which this wakes if it is waiting on the portal.
+  // The request threads tear down a published session; a session still being set up is closed by
+  // its start thread, which this wakes if it is waiting on the portal.
   unsigned id = GPOINTER_TO_UINT(data);
+  bool ours = false;
   g_mutex_lock(&session_lock);
-  if (id == session_id) session_closed = true;
+  if (id == session_id) {
+    session_closed = true;
+    ours = true;
+  }
   if (id == attempt_id && start_running) {
     start_closed = true;
     if (start_waiter) finish_wait(start_waiter, 2, NULL);
+    ours = true;
   }
+  if (ours) close_kind = CLOSE_PENDING;
   g_mutex_unlock(&session_lock);
+  // Whether the host stopped sharing or the screen locked is told apart a moment later.
+  if (ours) g_timeout_add_seconds(2, classify_close, read_restore_token());
 }
 
 static void close_portal_session(const char *handle) {
@@ -2021,6 +2111,7 @@ static gpointer start_session(gpointer data) {
   started = true;
   const char *restore = NULL;
   if (g_variant_lookup(results, "restore_token", "&s", &restore)) save_restore_token(restore);
+  else if (saved) unlink(token_file);  // used up, and would bring up a dialog nobody asked for
   g_variant_lookup(results, "devices", "u", &devices);
   g_variant_lookup(results, "clipboard_enabled", "b", &clipboard);
   code = 3;
@@ -2085,14 +2176,17 @@ done:
     // GNOME refuses new sessions while the screen is locked; that says nothing about the token.
     bool locked = code != 0 && code != 3 && screen_locked();
     g_mutex_lock(&session_lock);
-    if (start_closed) snprintf(session_error, sizeof session_error, "Screen sharing was stopped on the host.");
-    else if (locked) snprintf(session_error, sizeof session_error, "The host's screen is locked. Unlock it, then try again.");
+    if (start_closed) snprintf(session_error, sizeof session_error, "%s", closed_message());
+    else if (locked) snprintf(session_error, sizeof session_error, "%s",
+                              saved ? LOCKED_MESSAGE : "The host's screen is locked. Unlock it, then try again.");
     else if (code == 1) snprintf(session_error, sizeof session_error, "Screen sharing was declined on the host.");
     else if (code == -2) snprintf(session_error, sizeof session_error, "Nobody answered the screen sharing prompt on the host.");
     else if (error[0]) snprintf(session_error, sizeof session_error, "%s", error);
     else snprintf(session_error, sizeof session_error, "The desktop refused screen sharing (portal error %d).", code);
     // A token the desktop no longer accepts would fail the same way every time.
     if (presented && !started && !locked && !start_closed && (code == 1 || code == 2 || code == -2)) unlink(token_file);
+    // An approved session refused only because of the lock screen resumes once it is unlocked.
+    if (locked && saved && !start_closed) resume_when_unlocked = true;
     session_state = SESSION_NONE;
     start_running = false;
     g_mutex_unlock(&session_lock);
@@ -2115,21 +2209,24 @@ static void begin_session(void) {
   session_error[0] = 0;
   start_running = true;
   start_closed = false;
+  close_kind = CLOSE_NONE;
+  resume_when_unlocked = false;
   g_thread_unref(g_thread_new("portal-start", start_session, GUINT_TO_POINTER(++attempt_id)));
 }
 
 /// Brings the session up to date before a request. Called with session_lock held.
 static void refresh_session(void) {
+  // classify_close decides what the closing means for the token.
   if (session_closed) {
     teardown_session();
-    // The host stopped sharing (from the desktop's sharing indicator, say). Sharing resumes only
-    // once someone there approves again, so the token that would skip the dialog is dropped.
-    unlink(token_file);
-    snprintf(session_error, sizeof session_error, "Screen sharing was stopped on the host.");
+    snprintf(session_error, sizeof session_error, "%s", closed_message());
   }
-  // A helper's first request resumes an approved session silently. After that, sessions start only
-  // when asked for, so a failure is not retried in the background.
-  if (auto_start && g_file_test(token_file, G_FILE_TEST_EXISTS)) begin_session();
+  // A helper's first request resumes an approved session silently, as does the first request after
+  // the lock screen interrupted one. Otherwise sessions start only when asked for, so a failure is
+  // not retried in the background.
+  bool token = g_file_test(token_file, G_FILE_TEST_EXISTS);
+  if (auto_start && token) begin_session();
+  else if (resume_when_unlocked && token && session_state == SESSION_NONE && !start_running && !screen_locked()) begin_session();
   auto_start = false;
 }
 
@@ -2186,6 +2283,8 @@ static void wake_displays(void) {
 // MARK: - Wayland: capture
 
 static bool capture_frame(const Json *request, Buf *out) {
+  // Read before taking the lock: it is a D-Bus round trip, and input should not wait for it.
+  bool asleep = displays_asleep();
   g_mutex_lock(&session_lock);
   refresh_session();
   wait_for_session(3);
@@ -2193,7 +2292,7 @@ static bool capture_frame(const Json *request, Buf *out) {
     g_mutex_unlock(&session_lock);
     return fail("%s", session_error[0] ? session_error : "Screen sharing has not been approved on the host yet.");
   }
-  if (displays_asleep()) {
+  if (asleep) {
     if (!json_bool(json_get(request, "wake"), false)) {
       g_mutex_unlock(&session_lock);
       buf_printf(out, "\"asleep\":true,\"locked\":%s", screen_locked() ? "true" : "false");
@@ -2203,34 +2302,44 @@ static bool capture_frame(const Json *request, Buf *out) {
   }
   Monitor monitors[MAX_MONITORS];
   int count = monitors_of_streams(monitors);
-  const Monitor *d = resolve_monitor(monitors, count, json_get(request, "display"));
-  Stream *s = &streams[d - monitors];
+  const int index = (int)(resolve_monitor(monitors, count, json_get(request, "display")) - monitors);
+  // Frames are pulled and encoded outside the lock, so input does not wait for them. Only this
+  // thread pulls; the references keep the sink and frame alive if the session ends meanwhile.
+  const unsigned id = session_id;
+  GstElement *sink = gst_object_ref(streams[index].sink);
+  GstSample *sample = streams[index].sample ? gst_sample_ref(streams[index].sample) : NULL;
+  g_mutex_unlock(&session_lock);
   // Keep only the newest frame; a still screen produces none, so the last one stays valid. A new
   // stream gets up to 3 seconds for its first frame.
   for (int waited = 0;; waited++) {
-    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(s->sink), s->sample ? 0 : 100 * GST_MSECOND);
-    if (sample) {
-      if (s->sample) gst_sample_unref(s->sample);
-      s->sample = sample;
+    GstSample *next = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), sample ? 0 : 100 * GST_MSECOND);
+    if (next) {
+      if (sample) gst_sample_unref(sample);
+      sample = next;
       continue;
     }
-    if (s->sample || waited >= 30) break;
+    if (sample || waited >= 30) break;
   }
-  if (!s->sample) {
-    g_mutex_unlock(&session_lock);
-    return fail("the screen stream has not produced a frame yet");
-  }
+  gst_object_unref(sink);
+  if (!sample) return fail("the screen stream has not produced a frame yet");
   GstVideoInfo info;
-  if (!gst_video_info_from_caps(&info, gst_sample_get_caps(s->sample))) {
-    g_mutex_unlock(&session_lock);
+  if (!gst_video_info_from_caps(&info, gst_sample_get_caps(sample))) {
+    gst_sample_unref(sample);
     return fail("could not read the screen frame");
   }
-  s->monitor.pixel_width = GST_VIDEO_INFO_WIDTH(&info);
-  s->monitor.pixel_height = GST_VIDEO_INFO_HEIGHT(&info);
-  Monitor shown = s->monitor;
-  // The frame is encoded outside the lock, so input is not held up; the reference keeps it alive
-  // even if the session is torn down meanwhile.
-  GstSample *sample = gst_sample_ref(s->sample);
+  Monitor shown = monitors[index];
+  shown.pixel_width = GST_VIDEO_INFO_WIDTH(&info);
+  shown.pixel_height = GST_VIDEO_INFO_HEIGHT(&info);
+  g_mutex_lock(&session_lock);
+  if (session_id == id && index < stream_count) {
+    Stream *s = &streams[index];
+    if (s->sample != sample) {
+      if (s->sample) gst_sample_unref(s->sample);
+      s->sample = gst_sample_ref(sample);
+    }
+    s->monitor.pixel_width = shown.pixel_width;
+    s->monitor.pixel_height = shown.pixel_height;
+  }
   g_mutex_unlock(&session_lock);
   GstBuffer *buffer = gst_sample_get_buffer(sample);
   GstMapInfo map;
