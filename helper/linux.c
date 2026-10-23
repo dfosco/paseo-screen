@@ -29,6 +29,8 @@
 #include <X11/extensions/dpms.h>
 #include <X11/keysym.h>
 #endif
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <math.h>
 #include <poll.h>
@@ -598,8 +600,46 @@ static int screensaver_active(const char *service, const char *path) {
   return strstr(output, "true") != NULL;
 }
 
+#ifndef PASEO_WAYLAND
+/// True when DISPLAY is served by a virtual X server (Xvfb, Xvnc, Xephyr). Such a display has no lock
+/// screen of its own, and the screensaver on the session bus belongs to another session: on a home
+/// server with a virtual desktop, that is the user's GNOME login, whose lock would otherwise show here.
+static bool virtual_display(void) {
+  static int cached = -1;
+  if (cached >= 0) return cached;
+  cached = 0;
+  const char *display = getenv("DISPLAY");
+  const char *colon = display ? strchr(display, ':') : NULL;
+  if (!colon) return false;
+  char wanted[32];
+  snprintf(wanted, sizeof wanted, ":%.*s", (int)strcspn(colon + 1, "."), colon + 1);
+  DIR *proc = opendir("/proc");
+  struct dirent *entry;
+  while (proc && (entry = readdir(proc))) {
+    if (!isdigit((unsigned char)entry->d_name[0])) continue;
+    char path[300], args[4096];
+    snprintf(path, sizeof path, "/proc/%s/cmdline", entry->d_name);
+    FILE *file = fopen(path, "r");
+    if (!file) continue;
+    size_t n = fread(args, 1, sizeof args - 1, file);
+    fclose(file);
+    args[n] = 0;
+    const char *name = strrchr(args, '/') ? strrchr(args, '/') + 1 : args;
+    if (strcmp(name, "Xvfb") && strcmp(name, "Xvnc") && strcmp(name, "Xtigervnc") && strcmp(name, "Xephyr")) continue;
+    for (size_t i = strlen(args) + 1; i < n; i += strlen(args + i) + 1)
+      if (!strcmp(args + i, wanted)) cached = 1;
+    if (cached) break;
+  }
+  if (proc) closedir(proc);
+  return cached;
+}
+#endif
+
 /// True while the session's lock screen is showing. Checked at most every two seconds.
 static bool screen_locked(void) {
+#ifndef PASEO_WAYLAND
+  if (virtual_display()) return false;
+#endif
   static double checked_at = -100;
   static bool locked = false;
   double now = now_seconds();
