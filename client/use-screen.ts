@@ -169,8 +169,10 @@ export function useInputQueue(
     sending.current = true;
     try {
       while (queue.current.length > 0) {
-        // The RPC accepts at most 200 events per call.
-        const events = queue.current.splice(0, 200);
+        // The RPC accepts at most 200 events per call. A batch also ends after a text event, so each
+        // text chunk gets its own request and timeout (a Linux host may type it slowly).
+        const firstText = queue.current.findIndex((event) => event.type === "text");
+        const events = queue.current.splice(0, firstText >= 0 ? Math.min(firstText + 1, 200) : 200);
         try {
           const requested = displayRef.current;
           const result = await inputRef.current({ display: requested, events });

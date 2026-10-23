@@ -53,7 +53,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
      sudo pacman -S gcc libx11 libxext libxtst libxrandr libxfixes libjpeg-turbo
      ```
 
-     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. Wayland sessions are not supported yet.
+     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. Wayland sessions are not supported yet. A daemon started outside the desktop session with only `DISPLAY` set (for example a systemd unit with `DISPLAY=:0`) can end up on a Wayland desktop's XWayland server and show a black or partial picture.
 4. In any Paseo client, open **Screen · _host name_** from the sidebar, or search "host screen" in the command center.
 
 If a permission is missing on a Mac, the viewer says which one and offers a button that shows the macOS prompt on the host. Someone has to be at the host Mac to approve it once.
@@ -83,7 +83,7 @@ Anyone paired with the host can see and control its screen while the plugin is e
 
 ## Limitations
 
-- Mac hosts and Linux hosts running X11 are supported; Wayland sessions are not yet. Any Paseo client can view. Linux support has been tested on an X11 session only. Recent GNOME releases (for example Ubuntu 25.10 and later, Fedora 41 and later) no longer offer an X11 session, so those hosts need a desktop that still does, such as Xfce, MATE, Cinnamon or KDE Plasma on X11.
+- Mac hosts and Linux hosts running X11 are supported; Wayland sessions are not yet. Any Paseo client can view. Linux support has been tested on an X11 session only. Recent GNOME releases have dropped their X11 session (Ubuntu 25.10 and Fedora 43 no longer offer one), so those hosts need a desktop that still runs on X11, such as Xfce, MATE or Cinnamon.
 - On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` with the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.
 - On Linux, characters outside Latin-1 (such as Cyrillic, Greek or €), and any character the host's keyboard layout lacks, are typed by briefly remapping a spare key. That takes about 30 ms per character, so paste long non-Latin text instead of typing it. Pasting with Ctrl+V does not work in terminals; use Ctrl+Shift+V (⌘⇧V from a Mac).
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.

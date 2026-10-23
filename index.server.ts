@@ -64,7 +64,8 @@ function unsupportedReason(): string | null {
   // Through Xwayland, an X11 capture only sees X11 windows, and input does not reach Wayland apps.
   // WAYLAND_DISPLAY also covers compositors started without a login manager, which may leave
   // XDG_SESSION_TYPE unset (for example Sway or Hyprland launched from a TTY).
-  if (process.env.XDG_SESSION_TYPE === "wayland" || process.env.WAYLAND_DISPLAY) {
+  const session = process.env.XDG_SESSION_TYPE;
+  if (session === "wayland" || (session !== "x11" && process.env.WAYLAND_DISPLAY)) {
     return "This Linux host is running a Wayland session, and screen sharing needs X11 for now. If your login screen offers an X11 or Xorg session, log out and choose it; recent GNOME releases no longer include one.";
   }
   if (!process.env.DISPLAY) {
