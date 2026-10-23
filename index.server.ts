@@ -1,13 +1,16 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { HelperProcess, linuxBackend } from "./server/helper";
+import { HelperProcess, linuxBackend, NO_SESSION } from "./server/helper";
 import { readPreferredDisplay, writePreferredDisplay } from "./server/preferences";
 import { chooseDisplayRpc, clipboardRpc, frameRpc, inputRpc, requestPermissionsRpc, statusRpc, type ScreenStatus } from "./shared/rpc";
 
 export default function contribute(server: PluginServerContext) {
   const log = (message: string) => console.error(`[paseo-screen] ${message}`);
-  // Separate processes so clicks and keys never queue behind a frame capture.
+  // Separate processes so clicks and keys never queue behind a frame capture. On Wayland each
+  // process would need its own portal session and approval, so one helper serves both and answers
+  // frames on a thread of their own.
   const capture = new HelperProcess(log);
   const input = new HelperProcess(log);
+  const inputHelper = async () => (process.platform === "linux" && (await linuxBackend()) === "wayland" ? capture : input);
 
   async function readStatus(command: "status" | "request"): Promise<ScreenStatus> {
     const failed = { platform: process.platform, screenRecording: false, accessibility: false, locked: false, displays: [], preferredDisplay: null };
@@ -49,9 +52,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(statusRpc, () => readStatus("status"));
   server.handle(requestPermissionsRpc, () => readStatus("request"));
   server.handle(frameRpc, (request) => capture.request("frame", request));
-  server.handle(inputRpc, (request) => input.request("input", request));
+  server.handle(inputRpc, async (request) => (await inputHelper()).request("input", request));
   // Read on the input helper so it runs after any copy shortcut queued before it.
-  server.handle(clipboardRpc, () => input.request("clipboard"));
+  server.handle(clipboardRpc, async () => (await inputHelper()).request("clipboard"));
   server.handle(chooseDisplayRpc, async ({ display }) => {
     await writePreferredDisplay(display);
     return {};
@@ -70,5 +73,5 @@ async function unsupportedReason(): Promise<string | null> {
   if (process.platform !== "linux") return "Screen sharing is only available on macOS, Linux and Windows hosts.";
   // X11 sessions are read directly; Wayland sessions go through the desktop portals.
   if (await linuxBackend()) return null;
-  return "No desktop session to share on this host: nobody is logged in to a Wayland desktop, and the Paseo daemon has no X display (DISPLAY is not set). Log in on the host, or start Paseo from the desktop session.";
+  return NO_SESSION;
 }

@@ -59,7 +59,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
      - turn on **Allow Clipboard Access** for copy and paste between your devices;
      - choose **Share**.
 
-     The choice is remembered, so later viewers start without asking. If remote interaction was left off, **Show prompt on host** asks again. A user has to be logged in to the desktop on the host.
+     The choice is remembered, so later viewers start without asking. If remote interaction was left off, **Show prompt on host** asks again. While the screen is shared, the desktop shows its sharing indicator; stopping sharing there ends it, and it stays off until someone at the host approves the dialog again. A user has to be logged in to the desktop on the host.
    - **Linux on X11:** install a C compiler and the X11 and JPEG development packages. `libxtst-dev` is the one most desktops lack: it provides XTest, which the plugin uses to send mouse and keyboard input.
 
      ```bash

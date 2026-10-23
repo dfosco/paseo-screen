@@ -381,7 +381,8 @@ static const char *json_str(const Json *j) { return j && j->type == J_STR ? j->s
 
 // MARK: - Errors
 
-static char error_message[1024];
+// Per thread: the Wayland helper answers frame requests on a thread of their own.
+static __thread char error_message[1024];
 
 static bool fail(const char *format, ...) {
   va_list args;
@@ -640,15 +641,20 @@ static bool screen_locked(void) {
 #ifndef PASEO_WAYLAND
   if (virtual_display()) return false;
 #endif
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
   static double checked_at = -100;
   static bool locked = false;
+  pthread_mutex_lock(&lock);
   double now = now_seconds();
-  if (now - checked_at < 2) return locked;
-  checked_at = now;
-  int active = screensaver_active("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver");
-  if (active < 0) active = screensaver_active("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver");
-  locked = active == 1;
-  return locked;
+  if (now - checked_at >= 2) {
+    checked_at = now;
+    int active = screensaver_active("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver");
+    if (active < 0) active = screensaver_active("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver");
+    locked = active == 1;
+  }
+  bool result = locked;
+  pthread_mutex_unlock(&lock);
+  return result;
 }
 
 // MARK: - Capture
@@ -1563,13 +1569,17 @@ typedef struct {
   GstSample *sample;  // the latest frame
 } Stream;
 
+typedef struct Waiter Waiter;
+
 static GDBusConnection *bus;
 static GMainLoop *loop;
-// Guards everything below except the clipboard. The stdin thread owns the streams; the start
-// thread publishes them, and the main thread only flags a closed session.
+// Guards everything below except the clipboard. The start thread owns what it opens until it
+// publishes a working session here; the request threads use and tear down the published one, and
+// the main thread only flags closures.
 static GMutex session_lock;
 static int session_state = SESSION_NONE;
-static bool session_closed;
+static unsigned session_id;     // the start attempt that produced the published session
+static bool session_closed;     // the desktop closed the published session (the host stopped sharing)
 static char *session_handle;
 static uint32_t session_devices;
 static Stream streams[MAX_MONITORS];
@@ -1577,8 +1587,12 @@ static int stream_count;
 static int pipewire_fd = -1;
 static char session_error[512];
 static guint closed_subscription;
+static unsigned attempt_id;     // the latest start attempt
+static bool start_running;      // a start thread is alive; it may outlive SESSION_STARTING by its cleanup
+static bool start_closed;       // the desktop closed the session the start thread is setting up
+static Waiter *start_waiter;    // the portal reply the start thread is waiting for
+static bool auto_start = true;  // whether a saved token may start a session without a request
 static char token_file[1024];
-static double last_auto_start = -100;
 
 static GMutex clip_lock;
 static bool clipboard_enabled;
@@ -1604,58 +1618,92 @@ static char *request_path(const char *token) {
   return path;
 }
 
-typedef struct {
+struct Waiter {
   GMutex lock;
   GCond cond;
   bool done;
+  bool released;  // the Response subscription will not call back any more
   uint32_t response;
   GVariant *results;
-} Waiter;
+};
 
-static void on_response(GDBusConnection *connection, const char *sender, const char *path, const char *interface,
-                        const char *signal, GVariant *parameters, gpointer data) {
-  Waiter *waiter = data;
+/// Ends a wait with `response`, unless the reply already came. `results` is taken.
+static void finish_wait(Waiter *waiter, uint32_t response, GVariant *results) {
   g_mutex_lock(&waiter->lock);
   if (!waiter->done) {
-    g_variant_get(parameters, "(u@a{sv})", &waiter->response, &waiter->results);
+    waiter->response = response;
+    waiter->results = results;
+    results = NULL;
     waiter->done = true;
     g_cond_signal(&waiter->cond);
   }
   g_mutex_unlock(&waiter->lock);
+  if (results) g_variant_unref(results);
 }
 
-/// Calls a portal method that answers through a Request and waits for the Response. Never call it
-/// on the main thread: the Response is delivered there. Returns 0 on success, 1 when the user
-/// cancelled, 2 for other portal failures, -1 when the call itself failed, -2 on timeout.
+static void on_response(GDBusConnection *connection, const char *sender, const char *path, const char *interface,
+                        const char *signal, GVariant *parameters, gpointer data) {
+  uint32_t response;
+  GVariant *results;
+  g_variant_get(parameters, "(u@a{sv})", &response, &results);
+  finish_wait(data, response, results);
+}
+
+static void on_response_released(gpointer data) {
+  Waiter *waiter = data;
+  g_mutex_lock(&waiter->lock);
+  waiter->released = true;
+  g_cond_signal(&waiter->cond);
+  g_mutex_unlock(&waiter->lock);
+}
+
+/// Calls a portal method that answers through a Request and waits for the Response. Only the start
+/// thread calls it (the Response is delivered on the main thread). Returns 0 on success, 1 when the
+/// user cancelled, 2 for other portal failures (including the session closing meanwhile), -1 when
+/// the call itself failed, -2 on timeout. `results` is set on success only; `error` gets a message
+/// for -1.
 static int portal_call(const char *interface, const char *method, GVariant *parameters, const char *token,
-                       gint64 timeout_us, GVariant **results) {
+                       gint64 timeout_us, GVariant **results, char *error_text, size_t error_size) {
   *results = NULL;
   char *path = request_path(token);
   Waiter waiter = {0};
   g_mutex_init(&waiter.lock);
   g_cond_init(&waiter.cond);
   guint subscription = g_dbus_connection_signal_subscribe(bus, PORTAL_BUS, "org.freedesktop.portal.Request", "Response", path,
-                                                          NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_response, &waiter, NULL);
+                                                          NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_response, &waiter, on_response_released);
+  // A session closed by the desktop answers no more requests, so its closing ends the wait.
+  g_mutex_lock(&session_lock);
+  start_waiter = &waiter;
+  if (start_closed) finish_wait(&waiter, 2, NULL);
+  g_mutex_unlock(&session_lock);
   GError *error = NULL;
   GVariant *reply = g_dbus_connection_call_sync(bus, PORTAL_BUS, PORTAL_PATH, interface, method, parameters, NULL,
                                                 G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &error);
-  int code;
   if (!reply) {
-    snprintf(session_error, sizeof session_error, "%s.%s failed: %s", interface, method, error->message);
+    snprintf(error_text, error_size, "%s.%s failed: %s", interface, method, error->message);
     g_error_free(error);
-    code = -1;
   } else {
     g_variant_unref(reply);
     gint64 deadline = g_get_monotonic_time() + timeout_us;
     g_mutex_lock(&waiter.lock);
     while (!waiter.done)
       if (!g_cond_wait_until(&waiter.cond, &waiter.lock, deadline)) break;
-    bool done = waiter.done;
     g_mutex_unlock(&waiter.lock);
-    code = done ? (int)waiter.response : -2;
-    if (done) *results = waiter.results;
   }
+  g_mutex_lock(&session_lock);
+  start_waiter = NULL;
+  g_mutex_unlock(&session_lock);
+  // A Response already queued on the main thread may still arrive after unsubscribing; the waiter
+  // lives on this stack, so wait until GDBus lets go of it.
   g_dbus_connection_signal_unsubscribe(bus, subscription);
+  gint64 release_deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+  g_mutex_lock(&waiter.lock);
+  while (!waiter.released)
+    if (!g_cond_wait_until(&waiter.cond, &waiter.lock, release_deadline)) break;
+  int code = !reply ? -1 : waiter.done ? (int)waiter.response : -2;
+  g_mutex_unlock(&waiter.lock);
+  if (code == 0) *results = waiter.results;
+  else if (waiter.results) g_variant_unref(waiter.results);
   g_mutex_clear(&waiter.lock);
   g_cond_clear(&waiter.cond);
   g_free(path);
@@ -1696,8 +1744,8 @@ static void save_restore_token(const char *token) {
   char *dir = g_path_get_dirname(token_file);
   g_mkdir_with_parents(dir, 0700);
   g_free(dir);
-  g_file_set_contents(token_file, token, -1, NULL);
-  chmod(token_file, 0600);
+  // Created private, rather than made private after the write.
+  g_file_set_contents_full(token_file, token, -1, G_FILE_SET_CONTENTS_CONSISTENT, 0600, NULL);
 }
 
 // MARK: - Wayland: display names (GNOME)
@@ -1760,34 +1808,49 @@ static void name_monitors(void) {
 
 static void on_session_closed(GDBusConnection *connection, const char *sender, const char *path, const char *interface,
                               const char *signal, GVariant *parameters, gpointer data) {
-  // Teardown belongs to the stdin thread, which owns the streams; here the session is only flagged.
+  // Only flagged here. The request threads tear down a published session; a session still being
+  // set up is closed by its start thread, which this wakes if it is waiting on the portal.
+  unsigned id = GPOINTER_TO_UINT(data);
   g_mutex_lock(&session_lock);
-  session_closed = true;
+  if (id == session_id) session_closed = true;
+  if (id == attempt_id && start_running) {
+    start_closed = true;
+    if (start_waiter) finish_wait(start_waiter, 2, NULL);
+  }
   g_mutex_unlock(&session_lock);
 }
 
-/// Releases the session. Called with session_lock held, on the stdin thread.
-static void teardown_session(void) {
-  for (int i = 0; i < stream_count; i++) {
-    if (streams[i].pipeline) {
-      gst_element_set_state(streams[i].pipeline, GST_STATE_NULL);
-      gst_object_unref(streams[i].sink);
-      gst_object_unref(streams[i].pipeline);
+static void close_portal_session(const char *handle) {
+  GVariant *reply = g_dbus_connection_call_sync(bus, PORTAL_BUS, handle, PORTAL_SESSION, "Close", NULL, NULL,
+                                                G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+  if (reply) g_variant_unref(reply);
+}
+
+static void stop_streams(Stream *list, int count) {
+  for (int i = 0; i < count; i++) {
+    if (list[i].pipeline) {
+      gst_element_set_state(list[i].pipeline, GST_STATE_NULL);
+      gst_object_unref(list[i].pipeline);
     }
-    if (streams[i].sample) gst_sample_unref(streams[i].sample);
+    if (list[i].sink) gst_object_unref(list[i].sink);
+    if (list[i].sample) gst_sample_unref(list[i].sample);
   }
-  memset(streams, 0, sizeof streams);
+  memset(list, 0, sizeof *list * (size_t)count);
+}
+
+/// Releases the published session. Called with session_lock held.
+static void teardown_session(void) {
+  stop_streams(streams, stream_count);
   stream_count = 0;
   if (pipewire_fd >= 0) close(pipewire_fd);
   pipewire_fd = -1;
   if (closed_subscription) g_dbus_connection_signal_unsubscribe(bus, closed_subscription);
   closed_subscription = 0;
-  if (session_handle && !session_closed)
-    g_dbus_connection_call_sync(bus, PORTAL_BUS, session_handle, PORTAL_SESSION, "Close", NULL, NULL, G_DBUS_CALL_FLAGS_NONE,
-                                3000, NULL, NULL);
+  if (session_handle && !session_closed) close_portal_session(session_handle);
   g_free(session_handle);
   session_handle = NULL;
   session_closed = false;
+  session_id = 0;
   session_devices = 0;
   session_state = SESSION_NONE;
   g_mutex_lock(&clip_lock);
@@ -1796,17 +1859,17 @@ static void teardown_session(void) {
   g_mutex_unlock(&clip_lock);
 }
 
-static bool start_pipelines(void) {
+static bool pipewire_available(void) {
   GstElementFactory *source = gst_element_factory_find("pipewiresrc");
-  if (!source) {
-    snprintf(session_error, sizeof session_error,
-             "GStreamer's PipeWire plugin is missing, so the screen cannot be read. Install it on the host "
-             "(Debian or Ubuntu: gstreamer1.0-pipewire; Fedora: pipewire-gstreamer; Arch: gst-plugin-pipewire).");
-    return false;
-  }
-  gst_object_unref(source);
-  for (int i = 0; i < stream_count; i++) {
-    Stream *s = &streams[i];
+  if (source) gst_object_unref(source);
+  return source != NULL;
+}
+
+/// Starts a GStreamer pipeline per stream. pipewiresrc duplicates `fd` for itself, so the caller
+/// keeps (and later closes) its own.
+static bool start_pipelines(Stream *list, int count, int fd, char *error, size_t error_size) {
+  for (int i = 0; i < count; i++) {
+    Stream *s = &list[i];
     char description[512];
     // `path` takes the portal's node id (`target-object` wants a serial or name, and a miss there
     // silently links the default video source, a webcam). dont-fallback and dont-reconnect make a
@@ -1816,16 +1879,19 @@ static bool start_pipelines(void) {
              "pipewiresrc fd=%d path=%u always-copy=true keepalive-time=1000 "
              "stream-properties=\"props,node.dont-fallback=(boolean)true,node.dont-reconnect=(boolean)true\" ! "
              "videoconvert ! video/x-raw,format=BGRx ! appsink name=sink max-buffers=1 drop=true sync=false",
-             dup(pipewire_fd), s->node);
-    GError *error = NULL;
-    s->pipeline = gst_parse_launch(description, &error);
+             fd, s->node);
+    GError *failure = NULL;
+    s->pipeline = gst_parse_launch(description, &failure);
     if (!s->pipeline) {
-      snprintf(session_error, sizeof session_error, "could not start the screen stream: %s", error ? error->message : "?");
-      if (error) g_error_free(error);
+      snprintf(error, error_size, "could not start the screen stream: %s", failure ? failure->message : "?");
+      if (failure) g_error_free(failure);
       return false;
     }
     s->sink = gst_bin_get_by_name(GST_BIN(s->pipeline), "sink");
-    gst_element_set_state(s->pipeline, GST_STATE_PLAYING);
+    if (!s->sink || gst_element_set_state(s->pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+      snprintf(error, error_size, "could not start the screen stream");
+      return false;
+    }
   }
   return true;
 }
@@ -1836,31 +1902,84 @@ static uint32_t stable_id(const char *text) {
   return (hash & 0x7FFFFFFF) | 1;
 }
 
+/// Reads the streams the host shared from Start's results.
+static int read_streams(GVariant *results, Stream *out) {
+  int count = 0;
+  GVariant *list = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
+  if (!list) return 0;
+  GVariantIter iter;
+  uint32_t node;
+  GVariant *props;
+  g_variant_iter_init(&iter, list);
+  while (count < MAX_MONITORS && g_variant_iter_next(&iter, "(u@a{sv})", &node, &props)) {
+    Stream *s = &out[count];
+    memset(s, 0, sizeof *s);
+    s->node = node;
+    gint32 x = 0, y = 0, w = 0, h = 0;
+    g_variant_lookup(props, "position", "(ii)", &x, &y);
+    g_variant_lookup(props, "size", "(ii)", &w, &h);
+    const char *id = NULL;
+    g_variant_lookup(props, "id", "&s", &id);
+    char fallback[32];
+    snprintf(fallback, sizeof fallback, "%d,%d", x, y);
+    s->monitor = (Monitor){.id = stable_id(id ? id : fallback), .x = x, .y = y, .width = w, .height = h};
+    snprintf(s->monitor.name, sizeof s->monitor.name, "Display %d", count + 1);
+    count++;
+    g_variant_unref(props);
+  }
+  g_variant_unref(list);
+  return count;
+}
+
 /// Runs the portal handshake on its own thread, because Start waits for someone at the host to
-/// answer the dialog. Status polling reports "awaiting approval" meanwhile.
-static gpointer start_session(gpointer unused) {
+/// answer the dialog. Status polling reports "awaiting approval" meanwhile. Everything opened here
+/// stays this thread's until a working session is published, and is closed again on any failure.
+static gpointer start_session(gpointer data) {
+  const unsigned id = GPOINTER_TO_UINT(data);
   char *saved = read_restore_token();
   char *handle = NULL;
+  guint subscription = 0;
+  int fd = -1;
+  Stream found[MAX_MONITORS];
+  int found_count = 0;
   GVariant *results = NULL;
-  char *token = new_token(), *session_token = new_token();
-  int code;
+  uint32_t devices = 0;
+  gboolean clipboard = FALSE;
+  bool presented = false;  // the saved token went to the portal (CreateSession fails without it)
+  bool started = false;    // Start succeeded, which used up the saved token
+  bool published = false;
+  char error[512] = "";
+  int code = 3;  // 3: failed on this side rather than in the portal
+  char *token, *session_token;
   GVariantBuilder extra;
 
+  memset(found, 0, sizeof found);
+  // Checked first, so a host without the plugin is not asked to approve a session that cannot work.
+  if (!pipewire_available()) {
+    snprintf(error, sizeof error,
+             "GStreamer's PipeWire plugin is missing, so the screen cannot be read. Install it on the host "
+             "(Debian or Ubuntu: gstreamer1.0-pipewire; Fedora: pipewire-gstreamer; Arch: gst-plugin-pipewire).");
+    goto done;
+  }
+
+  token = new_token();
+  session_token = new_token();
   g_variant_builder_init(&extra, G_VARIANT_TYPE_VARDICT);
   g_variant_builder_add(&extra, "{sv}", "session_handle_token", g_variant_new_string(session_token));
   code = portal_call(PORTAL_REMOTE, "CreateSession", g_variant_new("(@a{sv})", token_options(token, &extra)), token,
-                     30 * G_USEC_PER_SEC, &results);
+                     30 * G_USEC_PER_SEC, &results, error, sizeof error);
   g_free(token);
-  if (code != 0) goto failed;
+  g_free(session_token);
+  if (code != 0) goto done;
   g_variant_lookup(results, "session_handle", "s", &handle);
   g_variant_unref(results);
-  if (!handle) goto failed;
-
-  g_mutex_lock(&session_lock);
-  session_handle = g_strdup(handle);
-  closed_subscription = g_dbus_connection_signal_subscribe(bus, PORTAL_BUS, PORTAL_SESSION, "Closed", handle, NULL,
-                                                           G_DBUS_SIGNAL_FLAGS_NONE, on_session_closed, NULL, NULL);
-  g_mutex_unlock(&session_lock);
+  results = NULL;
+  if (!handle) {
+    code = 2;
+    goto done;
+  }
+  subscription = g_dbus_connection_signal_subscribe(bus, PORTAL_BUS, PORTAL_SESSION, "Closed", handle, NULL,
+                                                    G_DBUS_SIGNAL_FLAGS_NONE, on_session_closed, GUINT_TO_POINTER(id), NULL);
 
   // Clipboard access has to be requested before Start; desktops without the portal just skip it.
   GVariant *clip = g_dbus_connection_call_sync(bus, PORTAL_BUS, PORTAL_PATH, PORTAL_CLIPBOARD, "RequestClipboard",
@@ -1868,16 +1987,18 @@ static gpointer start_session(gpointer unused) {
                                                NULL, NULL);
   if (clip) g_variant_unref(clip);
 
+  presented = saved != NULL;
   token = new_token();
   g_variant_builder_init(&extra, G_VARIANT_TYPE_VARDICT);
   g_variant_builder_add(&extra, "{sv}", "types", g_variant_new_uint32(DEVICE_KEYBOARD | DEVICE_POINTER));
   g_variant_builder_add(&extra, "{sv}", "persist_mode", g_variant_new_uint32(2));  // until revoked
   if (saved) g_variant_builder_add(&extra, "{sv}", "restore_token", g_variant_new_string(saved));
   code = portal_call(PORTAL_REMOTE, "SelectDevices", g_variant_new("(o@a{sv})", handle, token_options(token, &extra)), token,
-                     30 * G_USEC_PER_SEC, &results);
+                     30 * G_USEC_PER_SEC, &results, error, sizeof error);
   g_free(token);
   if (results) g_variant_unref(results);
-  if (code != 0) goto failed;
+  results = NULL;
+  if (code != 0) goto done;
 
   token = new_token();
   g_variant_builder_init(&extra, G_VARIANT_TYPE_VARDICT);
@@ -1885,114 +2006,131 @@ static gpointer start_session(gpointer unused) {
   g_variant_builder_add(&extra, "{sv}", "multiple", g_variant_new_boolean(TRUE));
   g_variant_builder_add(&extra, "{sv}", "cursor_mode", g_variant_new_uint32(2));  // pointer drawn into frames
   code = portal_call(PORTAL_SCREENCAST, "SelectSources", g_variant_new("(o@a{sv})", handle, token_options(token, &extra)),
-                     token, 30 * G_USEC_PER_SEC, &results);
+                     token, 30 * G_USEC_PER_SEC, &results, error, sizeof error);
   g_free(token);
   if (results) g_variant_unref(results);
-  if (code != 0) goto failed;
+  results = NULL;
+  if (code != 0) goto done;
 
   // The dialog, when there is one, waits for a person at the host.
   token = new_token();
   code = portal_call(PORTAL_REMOTE, "Start", g_variant_new("(os@a{sv})", handle, "", token_options(token, NULL)), token,
-                     10 * 60 * G_USEC_PER_SEC, &results);
+                     10 * 60 * G_USEC_PER_SEC, &results, error, sizeof error);
   g_free(token);
-  if (code != 0) goto failed;
+  if (code != 0) goto done;
+  started = true;
+  const char *restore = NULL;
+  if (g_variant_lookup(results, "restore_token", "&s", &restore)) save_restore_token(restore);
+  g_variant_lookup(results, "devices", "u", &devices);
+  g_variant_lookup(results, "clipboard_enabled", "b", &clipboard);
+  code = 3;
 
   GUnixFDList *fds = NULL;
   GVariant *remote = g_dbus_connection_call_with_unix_fd_list_sync(
       bus, PORTAL_BUS, PORTAL_PATH, PORTAL_SCREENCAST, "OpenPipeWireRemote", g_variant_new("(oa{sv})", handle, NULL),
       G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, 10000, NULL, &fds, NULL, NULL);
-  if (!remote) {
-    snprintf(session_error, sizeof session_error, "could not open the PipeWire stream");
-    g_variant_unref(results);
-    code = 2;
-    goto failed;
+  if (remote) {
+    gint32 fd_index;
+    g_variant_get(remote, "(h)", &fd_index);
+    fd = g_unix_fd_list_get(fds, fd_index, NULL);
+    g_variant_unref(remote);
   }
-  gint32 fd_index;
-  g_variant_get(remote, "(h)", &fd_index);
-  int fd = g_unix_fd_list_get(fds, fd_index, NULL);
-  g_variant_unref(remote);
-  g_object_unref(fds);
+  if (fds) g_object_unref(fds);
+  if (fd < 0) {
+    snprintf(error, sizeof error, "could not open the PipeWire stream");
+    goto done;
+  }
+
+  found_count = read_streams(results, found);
+  if (!found_count) {
+    snprintf(error, sizeof error, "The host shared no screens.");
+    goto done;
+  }
+  if (!start_pipelines(found, found_count, fd, error, sizeof error)) goto done;
 
   g_mutex_lock(&session_lock);
-  pipewire_fd = fd;
-  uint32_t devices = 0;
-  g_variant_lookup(results, "devices", "u", &devices);
-  session_devices = devices;
-  const char *restore = NULL;
-  if (g_variant_lookup(results, "restore_token", "&s", &restore)) save_restore_token(restore);
-  gboolean clipboard = FALSE;
-  g_variant_lookup(results, "clipboard_enabled", "b", &clipboard);
-  GVariant *list = g_variant_lookup_value(results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
-  stream_count = 0;
-  if (list) {
-    GVariantIter iter;
-    uint32_t node;
-    GVariant *props;
-    g_variant_iter_init(&iter, list);
-    while (stream_count < MAX_MONITORS && g_variant_iter_next(&iter, "(u@a{sv})", &node, &props)) {
-      Stream *s = &streams[stream_count];
-      memset(s, 0, sizeof *s);
-      s->node = node;
-      gint32 x = 0, y = 0, w = 0, h = 0;
-      g_variant_lookup(props, "position", "(ii)", &x, &y);
-      g_variant_lookup(props, "size", "(ii)", &w, &h);
-      const char *id = NULL;
-      g_variant_lookup(props, "id", "&s", &id);
-      char fallback[32];
-      snprintf(fallback, sizeof fallback, "%d,%d", x, y);
-      s->monitor = (Monitor){.id = stable_id(id ? id : fallback), .x = x, .y = y, .width = w, .height = h};
-      snprintf(s->monitor.name, sizeof s->monitor.name, "Display %d", stream_count + 1);
-      stream_count++;
-      g_variant_unref(props);
-    }
-    g_variant_unref(list);
+  if (start_closed) {
+    g_mutex_unlock(&session_lock);
+    code = 2;
+    goto done;
   }
-  g_variant_unref(results);
+  session_handle = handle;
+  handle = NULL;
+  closed_subscription = subscription;
+  subscription = 0;
+  pipewire_fd = fd;
+  fd = -1;
+  memcpy(streams, found, sizeof found);
+  stream_count = found_count;
+  memset(found, 0, sizeof found);
+  found_count = 0;
+  session_devices = devices;
+  session_id = id;
+  session_closed = false;
+  session_state = SESSION_READY;
+  session_error[0] = 0;
+  start_running = false;
   name_monitors();
   bool any_main = false;
   for (int i = 0; i < stream_count; i++) any_main |= streams[i].monitor.main;
-  if (!any_main && stream_count) streams[0].monitor.main = true;
-  bool ok = stream_count > 0 && start_pipelines();
-  if (!ok && !session_error[0]) snprintf(session_error, sizeof session_error, "the host shared no screens");
-  session_state = ok ? SESSION_READY : SESSION_NONE;
-  if (ok) session_error[0] = 0;
+  if (!any_main) streams[0].monitor.main = true;
   g_mutex_unlock(&session_lock);
   g_mutex_lock(&clip_lock);
   clipboard_enabled = clipboard;
   g_mutex_unlock(&clip_lock);
-  g_free(handle);
-  g_free(saved);
-  return NULL;
+  published = true;
 
-failed:
-  g_mutex_lock(&session_lock);
-  if (code == 1) snprintf(session_error, sizeof session_error, "Screen sharing was declined on the host.");
-  else if (code == -2) snprintf(session_error, sizeof session_error, "Nobody answered the screen sharing prompt on the host.");
-  else if (!session_error[0]) snprintf(session_error, sizeof session_error, "The desktop refused screen sharing (portal error %d).", code);
-  // A token the desktop no longer accepts would fail the same way every time.
-  if (saved && code != -1) unlink(token_file);
-  session_state = SESSION_NONE;
-  g_mutex_unlock(&session_lock);
+done:
+  if (!published) {
+    // GNOME refuses new sessions while the screen is locked; that says nothing about the token.
+    bool locked = code != 0 && code != 3 && screen_locked();
+    g_mutex_lock(&session_lock);
+    if (start_closed) snprintf(session_error, sizeof session_error, "Screen sharing was stopped on the host.");
+    else if (locked) snprintf(session_error, sizeof session_error, "The host's screen is locked. Unlock it, then try again.");
+    else if (code == 1) snprintf(session_error, sizeof session_error, "Screen sharing was declined on the host.");
+    else if (code == -2) snprintf(session_error, sizeof session_error, "Nobody answered the screen sharing prompt on the host.");
+    else if (error[0]) snprintf(session_error, sizeof session_error, "%s", error);
+    else snprintf(session_error, sizeof session_error, "The desktop refused screen sharing (portal error %d).", code);
+    // A token the desktop no longer accepts would fail the same way every time.
+    if (presented && !started && !locked && !start_closed && (code == 1 || code == 2 || code == -2)) unlink(token_file);
+    session_state = SESSION_NONE;
+    start_running = false;
+    g_mutex_unlock(&session_lock);
+  }
+  stop_streams(found, found_count);
+  if (fd >= 0) close(fd);
+  if (subscription) g_dbus_connection_signal_unsubscribe(bus, subscription);
+  if (handle) close_portal_session(handle);
   g_free(handle);
+  if (results) g_variant_unref(results);
   g_free(saved);
   return NULL;
 }
 
-/// Starts the handshake unless one is running or done. Called with session_lock held.
+/// Starts the handshake unless a session is running or one is being set up or cleaned up. Called
+/// with session_lock held.
 static void begin_session(void) {
-  if (session_state != SESSION_NONE) return;
+  if (session_state != SESSION_NONE || start_running) return;
   session_state = SESSION_STARTING;
   session_error[0] = 0;
-  last_auto_start = now_seconds();
-  g_thread_unref(g_thread_new("portal-start", start_session, NULL));
+  start_running = true;
+  start_closed = false;
+  g_thread_unref(g_thread_new("portal-start", start_session, GUINT_TO_POINTER(++attempt_id)));
 }
 
-/// Brings the session up to date before a request: tears down a closed one, and restarts silently
-/// when a restore token exists (no dialog). Called with session_lock held.
+/// Brings the session up to date before a request. Called with session_lock held.
 static void refresh_session(void) {
-  if (session_closed) teardown_session();
-  if (session_state == SESSION_NONE && g_file_test(token_file, G_FILE_TEST_EXISTS) && now_seconds() - last_auto_start > 10)
-    begin_session();
+  if (session_closed) {
+    teardown_session();
+    // The host stopped sharing (from the desktop's sharing indicator, say). Sharing resumes only
+    // once someone there approves again, so the token that would skip the dialog is dropped.
+    unlink(token_file);
+    snprintf(session_error, sizeof session_error, "Screen sharing was stopped on the host.");
+  }
+  // A helper's first request resumes an approved session silently. After that, sessions start only
+  // when asked for, so a failure is not retried in the background.
+  if (auto_start && g_file_test(token_file, G_FILE_TEST_EXISTS)) begin_session();
+  auto_start = false;
 }
 
 /// Waits up to `seconds` for a session that is starting. Called with session_lock held; releases
@@ -2067,9 +2205,10 @@ static bool capture_frame(const Json *request, Buf *out) {
   int count = monitors_of_streams(monitors);
   const Monitor *d = resolve_monitor(monitors, count, json_get(request, "display"));
   Stream *s = &streams[d - monitors];
-  // Keep only the newest frame; a still screen produces none, so the last one stays valid.
+  // Keep only the newest frame; a still screen produces none, so the last one stays valid. A new
+  // stream gets up to 3 seconds for its first frame.
   for (int waited = 0;; waited++) {
-    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(s->sink), s->sample || waited ? 0 : 100 * GST_MSECOND);
+    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(s->sink), s->sample ? 0 : 100 * GST_MSECOND);
     if (sample) {
       if (s->sample) gst_sample_unref(s->sample);
       s->sample = sample;
@@ -2082,20 +2221,29 @@ static bool capture_frame(const Json *request, Buf *out) {
     return fail("the screen stream has not produced a frame yet");
   }
   GstVideoInfo info;
-  GstBuffer *buffer = gst_sample_get_buffer(s->sample);
-  GstMapInfo map;
-  if (!gst_video_info_from_caps(&info, gst_sample_get_caps(s->sample)) || !gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+  if (!gst_video_info_from_caps(&info, gst_sample_get_caps(s->sample))) {
     g_mutex_unlock(&session_lock);
     return fail("could not read the screen frame");
   }
   s->monitor.pixel_width = GST_VIDEO_INFO_WIDTH(&info);
   s->monitor.pixel_height = GST_VIDEO_INFO_HEIGHT(&info);
   Monitor shown = s->monitor;
-  // BGRx is B, G, R, x in memory: as a little-endian word, red is at bit 16.
-  bool ok = frame_reply(out, &shown, map.data, GST_VIDEO_INFO_PLANE_STRIDE(&info, 0), shown.pixel_width, shown.pixel_height,
-                        16, 8, 0, request);
-  gst_buffer_unmap(buffer, &map);
+  // The frame is encoded outside the lock, so input is not held up; the reference keeps it alive
+  // even if the session is torn down meanwhile.
+  GstSample *sample = gst_sample_ref(s->sample);
   g_mutex_unlock(&session_lock);
+  GstBuffer *buffer = gst_sample_get_buffer(sample);
+  GstMapInfo map;
+  bool ok;
+  if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+    // BGRx is B, G, R, x in memory: as a little-endian word, red is at bit 16.
+    ok = frame_reply(out, &shown, map.data, GST_VIDEO_INFO_PLANE_STRIDE(&info, 0), shown.pixel_width, shown.pixel_height,
+                     16, 8, 0, request);
+    gst_buffer_unmap(buffer, &map);
+  } else {
+    ok = fail("could not read the screen frame");
+  }
+  gst_sample_unref(sample);
   return ok;
 }
 
@@ -2592,8 +2740,11 @@ static void handle(char *line) {
   }
   json_free(request);
   buf_put(&out, "\n", 1);
+  static pthread_mutex_t output_lock = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&output_lock);
   fwrite(out.data, 1, out.len, stdout);
   fflush(stdout);
+  pthread_mutex_unlock(&output_lock);
   buf_free(&out);
 }
 
@@ -2620,19 +2771,50 @@ int main(void) {
 #endif
 
 #ifdef PASEO_WAYLAND
+// One helper serves both frames and input on Wayland, because each process would need a portal
+// session (and the host's approval) of its own. Frames are answered on their own thread so that
+// input never waits behind a capture; replies carry ids, so they may finish out of order.
+static GAsyncQueue *frame_requests;
+
+static gpointer frame_thread(gpointer unused) {
+  for (;;) {
+    char *line = g_async_queue_pop(frame_requests);
+    if (!*line) {
+      g_free(line);
+      return NULL;
+    }
+    handle(line);
+    g_free(line);
+  }
+}
+
+static bool is_frame_request(const char *line) {
+  Parser parser = {line};
+  Json *request = parse_value(&parser, 0);
+  const char *command = request && request->type == J_OBJ ? json_str(json_get(request, "cmd")) : NULL;
+  bool frame = command && !strcmp(command, "frame");
+  json_free(request);
+  return frame;
+}
+
 static gpointer stdin_thread(gpointer unused) {
+  frame_requests = g_async_queue_new();
+  GThread *frames = g_thread_new("frames", frame_thread, NULL);
   char *line = NULL;
   size_t capacity = 0;
   ssize_t length;
   while ((length = getline(&line, &capacity, stdin)) >= 0) {
     while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) line[--length] = 0;
     if (length == 0) continue;
-    handle(line);
+    if (is_frame_request(line)) g_async_queue_push(frame_requests, g_strdup(line));
+    else handle(line);
   }
   free(line);
+  g_async_queue_push(frame_requests, g_strdup(""));  // an empty line stops the frame thread
+  g_thread_join(frames);
+  // A start still in progress is left to the desktop, which closes it with this process's bus connection.
   g_mutex_lock(&session_lock);
-  wait_for_session(0);
-  if (session_state == SESSION_READY || session_handle) teardown_session();
+  if (session_state == SESSION_READY) teardown_session();
   g_mutex_unlock(&session_lock);
   g_main_loop_quit(loop);
   return NULL;

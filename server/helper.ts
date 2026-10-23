@@ -34,6 +34,9 @@ const WAYLAND_PACKAGES = [
 
 export type LinuxBackend = "x11" | "wayland";
 
+export const NO_SESSION =
+  "No desktop session to share on this host: nobody is logged in to a Wayland desktop, and the Paseo daemon has no X display (DISPLAY is not set). Log in on the host, or start Paseo from the desktop session.";
+
 /**
  * Which Linux helper this daemon needs. The environment answers for a daemon started inside the
  * desktop session. A daemon started outside it (a systemd user service, or over SSH) asks logind
@@ -81,7 +84,8 @@ export function ensureHelperBinary(): Promise<string> {
     },
     (error: unknown) => {
       buildPromise = null;
-      lastFailure = { at: Date.now(), error };
+      // A missing session is not a build failure: retry as soon as someone logs in.
+      if (!(error instanceof Error && error.message === NO_SESSION)) lastFailure = { at: Date.now(), error };
       throw error;
     },
   );
@@ -95,6 +99,8 @@ function buildName(backend: LinuxBackend | null): string {
 
 async function buildHelper(): Promise<string> {
   const backend = process.platform === "linux" ? await linuxBackend() : null;
+  // Without a session there is nothing to build for; the build is tried again once one appears.
+  if (process.platform === "linux" && !backend) throw new Error(NO_SESSION);
   const dir = path.join(CACHE_ROOT, buildName(backend));
   // Windows only runs files with an executable extension.
   const binary = path.join(dir, process.platform === "win32" ? "paseo-screen-helper.exe" : "paseo-screen-helper");

@@ -203,7 +203,7 @@ function PermissionBanner({ styles, linuxHost, status, loading, requesting, onRe
       ? "Waiting for approval on the host. Someone there has to choose Share in the screen sharing dialog, with Allow Remote Interaction turned on (and Allow Clipboard Access for copy and paste)."
       : viewOnly
         ? "The host shares its screen but did not allow remote interaction, so it can be viewed but not controlled. Show the prompt again and turn on Allow Remote Interaction."
-        : `${status.permissionError ? `${status.permissionError} ` : ""}This Wayland desktop has to approve screen sharing first. Show the prompt on the host; someone there chooses Share, with Allow Remote Interaction turned on (and Allow Clipboard Access for copy and paste). The choice is remembered.`;
+        : `${status.permissionError ? `${status.permissionError} ` : ""}This Wayland desktop has to approve screen sharing first. Show the prompt on the host; someone there chooses Share, with Allow Remote Interaction turned on (and Allow Clipboard Access for copy and paste). The choice is remembered until sharing is stopped on the host.`;
     return (
       <View style={styles.banner}>
         <Text style={styles.bannerText}>{text}</Text>
