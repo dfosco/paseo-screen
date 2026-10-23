@@ -59,8 +59,9 @@ export default function contribute(server: PluginServerContext) {
 
 /** Why this host cannot share its screen, or null when it can. */
 function unsupportedReason(): string | null {
-  if (process.platform === "darwin") return null;
-  if (process.platform !== "linux") return "Screen sharing is only available on macOS and Linux hosts.";
+  // Windows support is experimental: built and reviewed, not yet tested on a real Windows host.
+  if (process.platform === "darwin" || process.platform === "win32") return null;
+  if (process.platform !== "linux") return "Screen sharing is only available on macOS, Linux and Windows hosts.";
   // Through Xwayland, an X11 capture only sees X11 windows, and input does not reach Wayland apps.
   // WAYLAND_DISPLAY also covers compositors started without a login manager, which may leave
   // XDG_SESSION_TYPE unset (for example Sway or Hyprland launched from a TTY).

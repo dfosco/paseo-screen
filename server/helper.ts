@@ -13,9 +13,11 @@ const BUILD_RETRY_MS = 60_000;
 const CACHE_ROOT =
   process.platform === "darwin"
     ? path.join(homedir(), "Library", "Caches", "paseo-screen")
-    : path.join(process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"), "paseo-screen");
-/** The helper for this host: Swift with ScreenCaptureKit on macOS, C with X11 on Linux. */
-const HELPER = process.platform === "linux" ? HELPERS.linux : HELPERS.darwin;
+    : process.platform === "win32"
+      ? path.join(process.env.LOCALAPPDATA || path.join(homedir(), "AppData", "Local"), "paseo-screen")
+      : path.join(process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"), "paseo-screen");
+/** The helper for this host: Swift with ScreenCaptureKit on macOS, C with X11 on Linux, C# with GDI on Windows. */
+const HELPER = process.platform === "linux" ? HELPERS.linux : process.platform === "win32" ? HELPERS.win32 : HELPERS.darwin;
 const LINUX_PACKAGES = [
   "Debian or Ubuntu: sudo apt install gcc libx11-dev libxext-dev libxtst-dev libxrandr-dev libxfixes-dev libjpeg-dev.",
   "Fedora: sudo dnf install gcc libX11-devel libXext-devel libXtst-devel libXrandr-devel libXfixes-devel libjpeg-turbo-devel.",
@@ -43,13 +45,15 @@ export function ensureHelperBinary(): Promise<string> {
 
 async function buildHelper(): Promise<string> {
   const dir = path.join(CACHE_ROOT, HELPER.hash);
-  const binary = path.join(dir, "paseo-screen-helper");
+  // Windows only runs files with an executable extension.
+  const binary = path.join(dir, process.platform === "win32" ? "paseo-screen-helper.exe" : "paseo-screen-helper");
   if (existsSync(binary)) return binary;
   await mkdir(dir, { recursive: true });
   const source = path.join(dir, HELPER.file);
   const partial = `${binary}.partial`;
   await writeFile(source, HELPER.source);
   if (process.platform === "linux") await compileLinuxHelper(source, partial);
+  else if (process.platform === "win32") await compileWindowsHelper(source, partial);
   else await compileMacHelper(source, partial);
   await rename(partial, binary);
   await removeOldBuilds();
@@ -66,6 +70,29 @@ async function compileLinuxHelper(source: string, output: string): Promise<void>
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not build the screen helper. It needs a C compiler and the X11 and JPEG development packages. ${LINUX_PACKAGES} ${detail}`);
+  }
+}
+
+/**
+ * Builds the Windows helper with the C# compiler that ships with the .NET Framework 4.x in every
+ * Windows 10 and 11, so nothing has to be installed.
+ */
+async function compileWindowsHelper(source: string, output: string): Promise<void> {
+  const windows = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+  const candidates = ["Framework64", "Framework"].map((folder) => path.join(windows, "Microsoft.NET", folder, "v4.0.30319", "csc.exe"));
+  const compiler = candidates.find((candidate) => existsSync(candidate));
+  if (!compiler) {
+    throw new Error("Could not find the .NET Framework C# compiler (csc.exe) that Windows normally includes, so the screen helper cannot be built.");
+  }
+  const references = ["System.dll", "System.Drawing.dll", "System.Windows.Forms.dll", "System.Web.Extensions.dll"].map((dll) => `/reference:${dll}`);
+  try {
+    await execCommand(compiler, ["/nologo", "/optimize+", "/target:exe", "/platform:anycpu", `/out:${output}`, ...references, source], {
+      timeout: 300_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not build the screen helper with ${compiler}. ${detail}`);
   }
 }
 

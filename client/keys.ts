@@ -53,12 +53,13 @@ export function isAppleClient(): boolean {
 
 /**
  * How this client's keys become host shortcuts. A Mac client's Command key is the Mac host's Command,
- * but on a Linux host it is sent as Ctrl, the shortcut key there. Other clients' Ctrl stays Ctrl, and
- * their Super (Windows) key is sent as `cmd`, which is Command on a Mac host and Super on a Linux host.
+ * but on a Linux or Windows host it is sent as Ctrl, the shortcut key there. Other clients' Ctrl stays
+ * Ctrl, and their Super (Windows) key is sent as `cmd`: Command on a Mac host, Super on a Linux host and
+ * the Windows key on a Windows host.
  */
 export interface KeyMapping {
   commandAsCtrl: boolean;
-  /** Whether a paste or copy shortcut is held: Command, or Ctrl when a non-Apple client controls a Linux host. */
+  /** Whether a paste or copy shortcut is held: Command, or Ctrl when a non-Apple client controls a Linux or Windows host. */
   shortcut(event: ModifierState): boolean;
   /**
    * Send each key press as a press and release. An X server repeats a key held through XTest, so a
@@ -69,9 +70,11 @@ export interface KeyMapping {
 
 export function keyMapping(hostPlatform: string, appleClient: boolean): KeyMapping {
   const linuxHost = hostPlatform === "linux";
-  const ctrlShortcut = linuxHost && !appleClient;
+  // Linux and Windows both use Ctrl for shortcuts, and `cmd` is their Super/Windows key.
+  const pcHost = linuxHost || hostPlatform === "win32";
+  const ctrlShortcut = pcHost && !appleClient;
   return {
-    commandAsCtrl: linuxHost && appleClient,
+    commandAsCtrl: pcHost && appleClient,
     shortcut: (event) => (ctrlShortcut ? event.ctrlKey : event.metaKey),
     tapKeys: linuxHost,
   };

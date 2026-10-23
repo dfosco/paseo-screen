@@ -1,11 +1,12 @@
-// Embeds the native helpers (helper/main.swift for macOS, helper/linux.c for Linux) into
+// Embeds the native helpers (helper/main.swift for macOS, helper/linux.c for Linux, helper/windows.cs
+// for Windows) into
 // server/helper-source.generated.ts.
 // Plugin bundles are evaluated from memory, so the server cannot read files beside itself at runtime.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
 const root = new URL("..", import.meta.url);
-const helpers = { darwin: "main.swift", linux: "linux.c" };
+const helpers = { darwin: "main.swift", linux: "linux.c", win32: "windows.cs" };
 const entries = Object.entries(helpers).map(([platform, file]) => {
   const source = readFileSync(new URL(`helper/${file}`, root), "utf8");
   const hash = createHash("sha256").update(source).digest("hex").slice(0, 16);

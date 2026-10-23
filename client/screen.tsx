@@ -61,6 +61,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   const canCapture = lastGood.current?.screenRecording === true;
   const hostPlatform = lastGood.current?.platform ?? "darwin";
   const linuxHost = hostPlatform === "linux";
+  const windowsHost = hostPlatform === "win32";
   const mapping = useMemo(() => keyMapping(hostPlatform, isAppleClient()), [hostPlatform]);
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [rotated, setRotated] = useState(false);
@@ -132,12 +133,17 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
           <ToolButton styles={styles} label="Wake display" onPress={frames.wake} />
         </View>
       ) : null}
+      {windowsHost ? (
+        <Text style={styles.meta}>Windows hosts are experimental and not yet tested. Please report anything that misbehaves.</Text>
+      ) : null}
       {frames.locked && !frames.asleep ? (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
-            {`This ${linuxHost ? "computer" : "Mac"} is locked. ${
-              isWeb ? "Click the picture, type your password and press Return to unlock it." : "Type your password in the box below and press ⏎ to unlock it."
-            }`}
+            {windowsHost
+              ? "This PC is locked or showing a secure prompt such as UAC. Windows doesn't let other apps see or control those screens, so someone has to unlock it at the PC."
+              : `This ${linuxHost ? "computer" : "Mac"} is locked. ${
+                  isWeb ? "Click the picture, type your password and press Return to unlock it." : "Type your password in the box below and press ⏎ to unlock it."
+                }`}
           </Text>
         </View>
       ) : null}
@@ -168,7 +174,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
         <KeyBar
           styles={styles}
           compact={layout.compact}
-          linuxHost={linuxHost}
+          hostPlatform={hostPlatform}
           send={send}
           clipboard={clipboard.supported ? { copyFromHost: clipboard.pull, pasteToHost: () => void pasteLocalClipboard() } : null}
         />
@@ -201,10 +207,10 @@ function PermissionBanner({ styles, linuxHost, status, loading, requesting, onRe
   );
 }
 
-function KeyBar({ styles, compact, linuxHost, send, clipboard }: {
+function KeyBar({ styles, compact, hostPlatform, send, clipboard }: {
   styles: Styles;
   compact: boolean;
-  linuxHost: boolean;
+  hostPlatform: string;
   send(event: ScreenInputEvent): void;
   clipboard: { copyFromHost(): void; pasteToHost(): void } | null;
 }) {
@@ -214,7 +220,7 @@ function KeyBar({ styles, compact, linuxHost, send, clipboard }: {
     // Text events carry at most 10,000 UTF-16 units each; split on code points so no emoji is cut in half.
     // A Linux host types characters missing from its layout at about 30 ms each, so it gets small
     // chunks: each request then finishes well inside the 15 s timeout and other input is not starved.
-    const limit = linuxHost ? 200 : 10_000;
+    const limit = hostPlatform === "linux" ? 200 : 10_000;
     let chunk = "";
     for (const codePoint of text) {
       if (chunk.length + codePoint.length > limit) {
@@ -244,7 +250,19 @@ function KeyBar({ styles, compact, linuxHost, send, clipboard }: {
       <ToolButton styles={styles} label="Tab" onPress={key(KEY.tab)} />
       <ToolButton styles={styles} label="⏎" onPress={key(KEY.enter)} />
       <ToolButton styles={styles} label="⌫" onPress={key(KEY.backspace)} />
-      {linuxHost ? (
+      {hostPlatform === "win32" ? (
+        // Windows' default shortcuts; on a Windows host `cmd` is the Windows key.
+        <>
+          <ToolButton styles={styles} label="Alt+Tab" onPress={key(KEY.tab, ["alt"])} />
+          <ToolButton styles={styles} label="Task View" onPress={key(KEY.tab, ["cmd"])} />
+          <ToolButton styles={styles} label="Start" onPress={key(KEY.command)} />
+          <ToolButton styles={styles} label="Desktop" onPress={() => send({ type: "key", char: "d", modifiers: ["cmd"] })} />
+          <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
+          <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
+          <ToolButton styles={styles} label="◀ Desktop" onPress={key(KEY.left, ["ctrl", "cmd"])} />
+          <ToolButton styles={styles} label="Desktop ▶" onPress={key(KEY.right, ["ctrl", "cmd"])} />
+        </>
+      ) : hostPlatform === "linux" ? (
         // GNOME's default shortcuts; on a Linux host `cmd` is the Super key.
         <>
           <ToolButton styles={styles} label="Super+Tab" onPress={key(KEY.tab, ["cmd"])} />
