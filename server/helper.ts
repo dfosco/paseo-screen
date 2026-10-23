@@ -16,15 +16,60 @@ const CACHE_ROOT =
     : process.platform === "win32"
       ? path.join(process.env.LOCALAPPDATA || path.join(homedir(), "AppData", "Local"), "paseo-screen")
       : path.join(process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"), "paseo-screen");
-/** The helper for this host: Swift with ScreenCaptureKit on macOS, C with X11 on Linux, C# with GDI on Windows. */
+/**
+ * The helper for this host: Swift with ScreenCaptureKit on macOS, C# with GDI on Windows, and C on Linux,
+ * built either for X11 or, with -DPASEO_WAYLAND, for the Wayland desktop portals.
+ */
 const HELPER = process.platform === "linux" ? HELPERS.linux : process.platform === "win32" ? HELPERS.win32 : HELPERS.darwin;
 const LINUX_PACKAGES = [
   "Debian or Ubuntu: sudo apt install gcc libx11-dev libxext-dev libxtst-dev libxrandr-dev libxfixes-dev libjpeg-dev.",
   "Fedora: sudo dnf install gcc libX11-devel libXext-devel libXtst-devel libXrandr-devel libXfixes-devel libjpeg-turbo-devel.",
   "Arch: sudo pacman -S gcc libx11 libxext libxtst libxrandr libxfixes libjpeg-turbo.",
 ].join(" ");
+const WAYLAND_PACKAGES = [
+  "Debian or Ubuntu: sudo apt install gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libjpeg-dev gstreamer1.0-pipewire.",
+  "Fedora: sudo dnf install gcc pkgconf-pkg-config glib2-devel gstreamer1-devel gstreamer1-plugins-base-devel libjpeg-turbo-devel pipewire-gstreamer.",
+  "Arch: sudo pacman -S gcc pkgconf glib2 gstreamer gst-plugins-base libjpeg-turbo gst-plugin-pipewire.",
+].join(" ");
 
-/** Compiles the embedded helper once per source revision and returns the binary path. */
+export type LinuxBackend = "x11" | "wayland";
+
+/**
+ * Which Linux helper this daemon needs. The environment answers for a daemon started inside the
+ * desktop session. A daemon started outside it (a systemd user service, or over SSH) asks logind
+ * about the user's graphical session instead: a Wayland session is reachable through the session
+ * bus, while an X11 one also needs DISPLAY, which only the environment can give. Only an answer is
+ * remembered, so logging in after the daemon started is picked up.
+ */
+let knownBackend: LinuxBackend | null = null;
+export async function linuxBackend(): Promise<LinuxBackend | null> {
+  if (knownBackend) return knownBackend;
+  const session = process.env.XDG_SESSION_TYPE;
+  if (session === "wayland" || (session !== "x11" && process.env.WAYLAND_DISPLAY)) knownBackend = "wayland";
+  else if (process.env.DISPLAY) knownBackend = "x11";
+  else if ((await graphicalSessionType()) === "wayland") knownBackend = "wayland";
+  return knownBackend;
+}
+
+async function graphicalSessionType(): Promise<string | null> {
+  try {
+    const uid = String(process.getuid?.() ?? "");
+    const display = (await execCommand("loginctl", ["show-user", uid, "-p", "Display", "--value"], { timeout: 5_000 })).stdout.trim();
+    if (!display) return null;
+    return (await execCommand("loginctl", ["show-session", display, "-p", "Type", "--value"], { timeout: 5_000 })).stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/** The portals live on the user's session bus; a daemon started outside the session may lack its address. */
+function helperEnvironment(): NodeJS.ProcessEnv | undefined {
+  if (process.platform !== "linux" || knownBackend !== "wayland" || process.env.DBUS_SESSION_BUS_ADDRESS) return undefined;
+  const bus = `/run/user/${process.getuid?.()}/bus`;
+  return existsSync(bus) ? { ...process.env, DBUS_SESSION_BUS_ADDRESS: `unix:path=${bus}` } : undefined;
+}
+
+/** Compiles the embedded helper once per source revision (and Linux backend) and returns the binary path. */
 let buildPromise: Promise<string> | null = null;
 let lastFailure: { at: number; error: unknown } | null = null;
 export function ensureHelperBinary(): Promise<string> {
@@ -43,8 +88,14 @@ export function ensureHelperBinary(): Promise<string> {
   return buildPromise;
 }
 
+/** Cache folder name: the source hash, with a suffix for the Wayland build of the Linux helper. */
+function buildName(backend: LinuxBackend | null): string {
+  return backend === "wayland" ? `${HELPER.hash}-wayland` : HELPER.hash;
+}
+
 async function buildHelper(): Promise<string> {
-  const dir = path.join(CACHE_ROOT, HELPER.hash);
+  const backend = process.platform === "linux" ? await linuxBackend() : null;
+  const dir = path.join(CACHE_ROOT, buildName(backend));
   // Windows only runs files with an executable extension.
   const binary = path.join(dir, process.platform === "win32" ? "paseo-screen-helper.exe" : "paseo-screen-helper");
   if (existsSync(binary)) return binary;
@@ -52,7 +103,7 @@ async function buildHelper(): Promise<string> {
   const source = path.join(dir, HELPER.file);
   const partial = `${binary}.partial`;
   await writeFile(source, HELPER.source);
-  if (process.platform === "linux") await compileLinuxHelper(source, partial);
+  if (process.platform === "linux") await compileLinuxHelper(source, partial, backend);
   else if (process.platform === "win32") await compileWindowsHelper(source, partial);
   else await compileMacHelper(source, partial);
   await renameWithRetry(partial, binary);
@@ -61,7 +112,8 @@ async function buildHelper(): Promise<string> {
   return binary;
 }
 
-async function compileLinuxHelper(source: string, output: string): Promise<void> {
+async function compileLinuxHelper(source: string, output: string, backend: LinuxBackend | null): Promise<void> {
+  if (backend === "wayland") return compileWaylandHelper(source, output);
   const libraries = ["-lX11", "-lXext", "-lXtst", "-lXrandr", "-lXfixes", "-ljpeg", "-lpthread", "-lm"];
   try {
     await execCommand(process.env.CC || "cc", ["-O2", "-std=gnu11", "-o", output, source, ...libraries], {
@@ -71,6 +123,22 @@ async function compileLinuxHelper(source: string, output: string): Promise<void>
   } catch (error) {
     const detail = buildFailure(error);
     throw new Error(`Could not build the screen helper. It needs a C compiler and the X11 and JPEG development packages. ${LINUX_PACKAGES} ${detail}`);
+  }
+}
+
+async function compileWaylandHelper(source: string, output: string): Promise<void> {
+  const modules = ["gio-unix-2.0", "gstreamer-app-1.0", "gstreamer-video-1.0"];
+  try {
+    const flags = (await execCommand("pkg-config", ["--cflags", "--libs", ...modules], { timeout: 30_000 })).stdout.trim().split(/\s+/);
+    await execCommand(process.env.CC || "cc", ["-O2", "-std=gnu11", "-DPASEO_WAYLAND", "-o", output, source, ...flags, "-ljpeg", "-lpthread", "-lm"], {
+      timeout: 300_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = buildFailure(error);
+    throw new Error(
+      `Could not build the screen helper for Wayland. It needs a C compiler, pkg-config, and the GLib, GStreamer and JPEG development packages. ${WAYLAND_PACKAGES} ${detail}`,
+    );
   }
 }
 
@@ -140,7 +208,7 @@ function buildFailure(error: unknown): string {
 async function removeOldBuilds(): Promise<void> {
   const entries = await readdir(CACHE_ROOT).catch(() => [] as string[]);
   await Promise.all(
-    entries.filter((name) => name !== HELPER.hash).map((name) => rm(path.join(CACHE_ROOT, name), { recursive: true, force: true })),
+    entries.filter((name) => name !== buildName(null) && name !== buildName("wayland")).map((name) => rm(path.join(CACHE_ROOT, name), { recursive: true, force: true })),
   );
 }
 
@@ -186,7 +254,7 @@ export class HelperProcess {
     this.starting ??= ensureHelperBinary()
       .then((binary) => {
         if (this.stopped) throw new Error("screen helper stopped");
-        const child = spawnProcess(binary, [], { stdio: "pipe" });
+        const child = spawnProcess(binary, [], { stdio: "pipe", env: helperEnvironment() });
         child.on("exit", (code, signal) => {
           if (this.child === child) this.child = null;
           this.failPending(new Error(`screen helper exited (${signal ?? code})`));

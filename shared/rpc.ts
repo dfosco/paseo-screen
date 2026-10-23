@@ -33,6 +33,12 @@ const statusSchema = z.object({
    * choice starts with the display showing the focused window.
    */
   preferredDisplay: z.number().nullable(),
+  /** "wayland" when a Linux host shares through the desktop portals; absent elsewhere. */
+  backend: z.string().optional(),
+  /** Wayland: the desktop's screen sharing dialog is open on the host, waiting for an answer. */
+  awaitingApproval: z.boolean().optional(),
+  /** Wayland: why the last request was not approved, such as the dialog being declined. */
+  permissionError: z.string().optional(),
 });
 export type ScreenStatus = z.infer<typeof statusSchema>;
 

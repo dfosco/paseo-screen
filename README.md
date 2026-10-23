@@ -24,7 +24,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
 ## Requirements
 
 - A Mac host running macOS 14 or later, with the Xcode command line tools (`xcode-select --install`). The native helper is compiled with `swiftc` the first time it is used.
-- Or a Linux host running an X11 desktop session (Wayland is not supported yet), with a C compiler and the X11 and JPEG development packages, including `libxtst-dev` (see Install, step 3). The native helper is compiled with `cc` the first time it is used.
+- Or a Linux host with a desktop session, either Wayland (GNOME, KDE and other desktops with xdg-desktop-portal's RemoteDesktop and ScreenCast portals) or X11, with a C compiler and the development packages for that session (see Install, step 3). The native helper is compiled with `cc` the first time it is used.
 - Or, **experimentally**, a Windows 10 or 11 host. The native helper is compiled with the .NET Framework's `csc.exe`, which Windows includes, so nothing needs installing. Windows support is built and reviewed but not yet tested on a real Windows host.
 - Paseo 0.12 or later, with plugins enabled on the host.
 - Any Paseo client paired with that host.
@@ -43,7 +43,24 @@ It was built for the moments when an agent on a remote machine needs a human: wa
 
 3. Prepare the host:
    - **Mac:** open System Settings → Privacy & Security and turn on **Paseo** under both **Screen Recording** and **Accessibility**. Quit and reopen Paseo.
-   - **Linux:** install a C compiler and the X11 and JPEG development packages. The helper is compiled from source the first time the screen opens, and the build fails without them. `libxtst-dev` is the one most desktops lack: it provides XTest, which the plugin uses to send mouse and keyboard input.
+   - **Linux on Wayland** (the default on current Ubuntu, Fedora and GNOME): install a C compiler and the GLib, GStreamer and JPEG development packages, plus GStreamer's PipeWire plugin. The helper is compiled from source the first time the screen opens.
+
+     ```bash
+     # Debian or Ubuntu
+     sudo apt install gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libjpeg-dev gstreamer1.0-pipewire
+     # Fedora
+     sudo dnf install gcc pkgconf-pkg-config glib2-devel gstreamer1-devel gstreamer1-plugins-base-devel libjpeg-turbo-devel pipewire-gstreamer
+     # Arch
+     sudo pacman -S gcc pkgconf glib2 gstreamer gst-plugins-base libjpeg-turbo gst-plugin-pipewire
+     ```
+
+     Wayland only lets an app see the screen and send input after the desktop asks. The first time a viewer opens, the viewer offers **Show prompt on host**, and the desktop's screen sharing dialog appears on the host. Someone at the host has to answer it once:
+     - turn on **Allow Remote Interaction**. It is off by default, and without it the screen can be watched but not controlled;
+     - turn on **Allow Clipboard Access** for copy and paste between your devices;
+     - choose **Share**.
+
+     The choice is remembered, so later viewers start without asking. If remote interaction was left off, **Show prompt on host** asks again. A user has to be logged in to the desktop on the host.
+   - **Linux on X11:** install a C compiler and the X11 and JPEG development packages. `libxtst-dev` is the one most desktops lack: it provides XTest, which the plugin uses to send mouse and keyboard input.
 
      ```bash
      # Debian or Ubuntu
@@ -54,7 +71,7 @@ It was built for the moments when an agent on a remote machine needs a human: wa
      sudo pacman -S gcc libx11 libxext libxtst libxrandr libxfixes libjpeg-turbo
      ```
 
-     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. Wayland sessions are not supported yet. A daemon started outside the desktop session with only `DISPLAY` set (for example a systemd unit with `DISPLAY=:0`) can end up on a Wayland desktop's XWayland server and show a black or partial picture.
+     Linux hosts on X11 need no permissions. Paseo has to run inside the desktop session, which is the case for the Paseo desktop app, so the helper can reach the display. A daemon started outside the desktop session with only `DISPLAY` set (for example a systemd unit with `DISPLAY=:0`) can end up on a Wayland desktop's XWayland server and show a black picture; without `DISPLAY`, the plugin finds a logged-in Wayland desktop through logind and uses the portals instead.
    - **Windows (experimental):** nothing to prepare. Paseo has to run in the signed-in desktop session, as the Paseo desktop app does. Windows doesn't let normal apps see or control the lock screen, sign-in screen or UAC prompts, so those have to be handled at the PC, and apps running as administrator ignore input from the plugin.
 4. In any Paseo client, open **Screen · _host name_** from the sidebar, or search "host screen" in the command center.
 
@@ -70,7 +87,8 @@ Paseo client (laptop, web, phone)                    Host (Paseo daemon)
    - polls screen.frame, two in flight                   ├─ helper #1: ScreenCaptureKit → JPEG
    - sends screen.input batches                          └─ helper #2: mouse and keyboard
                                                          macOS: ScreenCaptureKit and CGEvent
-                                                         Linux: X11 (XShm, XTest, XRandR, XFixes) and libjpeg
+                                                         Linux on X11: XShm, XTest, XRandR, XFixes, libjpeg
+                                                         Linux on Wayland: desktop portals, PipeWire, libjpeg
 ```
 
 - `helper/main.swift` (macOS), `helper/linux.c` (Linux) and `helper/windows.cs` (Windows, experimental) are small native helpers speaking the same line-delimited JSON. The plugin server embeds all three sources, compiles the one for its platform into `~/Library/Caches/paseo-screen/<hash>/` on macOS, `~/.cache/paseo-screen/<hash>/` on Linux or `%LOCALAPPDATA%\paseo-screen\<hash>\` on Windows, and runs two copies so input never waits behind a frame capture.
@@ -86,9 +104,11 @@ Anyone paired with the host can see and control its screen while the plugin is e
 
 ## Limitations
 
-- Mac hosts and Linux hosts running X11 are supported; Wayland sessions are not yet. Windows hosts are experimental and untested. Any Paseo client can view. Linux support has been tested on an X11 session only. Recent GNOME releases have dropped their X11 session (Ubuntu 25.10 and Fedora 43 no longer offer one), so those hosts need a desktop that still runs on X11, such as Xfce, MATE or Cinnamon.
+- Mac hosts and Linux hosts on Wayland or X11 are supported. Windows hosts are experimental and untested. Any Paseo client can view. Wayland support has been tested on GNOME 50 (Ubuntu 26.04) with one display, including a 4K panel at 200% scaling; multiple displays and other Wayland desktops (KDE, Sway, Hyprland) are untested.
+- On Wayland, characters the host's keyboard layout lacks (✓, emoji, é on a US layout) cannot be typed; the desktop drops them. Paste them instead (⌘V or Ctrl+V), which works for any text.
+- On GNOME with display scaling, the pointer is placed with an absolute move near the corner followed by a relative move, because GNOME reads the portal's absolute positions as physical pixels. Other Wayland desktops get plain absolute moves.
 - On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` with the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.
-- On Linux, characters outside Latin-1 (such as Cyrillic, Greek or €), and any character the host's keyboard layout lacks, are typed by briefly remapping a spare key. That takes about 30 ms per character, so paste long non-Latin text instead of typing it. Pasting with Ctrl+V does not work in terminals; use Ctrl+Shift+V (⌘⇧V from a Mac).
+- On Linux X11, characters outside Latin-1 (such as Cyrillic, Greek or €), and any character the host's keyboard layout lacks, are typed by briefly remapping a spare key. That takes about 30 ms per character, so paste long non-Latin text instead of typing it. Pasting with Ctrl+V does not work in terminals; use Ctrl+Shift+V (⌘⇧V from a Mac).
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.
 - Granting the two macOS permissions needs someone physically at a Mac host once.
 - The plugin doesn't stop the host from sleeping or locking on its own schedule. Opening the viewer, using the mouse or keyboard on the picture, or the **Wake display** button wakes the display, and you unlock it by typing your password. Touch ID isn't available remotely.

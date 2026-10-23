@@ -195,6 +195,22 @@ function PermissionBanner({ styles, linuxHost, status, loading, requesting, onRe
   if (!status.supported || status.error) return <Text style={styles.error}>{status.error ?? "Unsupported host."}</Text>;
   const missing = [!status.screenRecording && "Screen Recording", !status.accessibility && "Accessibility"].filter(Boolean);
   if (missing.length === 0) return null;
+  // Wayland: the desktop asks in its own dialog, and its switches decide what is allowed.
+  if (linuxHost && status.backend === "wayland") {
+    const waiting = status.awaitingApproval === true;
+    const viewOnly = status.screenRecording && !status.accessibility;
+    const text = waiting
+      ? "Waiting for approval on the host. Someone there has to choose Share in the screen sharing dialog, with Allow Remote Interaction turned on (and Allow Clipboard Access for copy and paste)."
+      : viewOnly
+        ? "The host shares its screen but did not allow remote interaction, so it can be viewed but not controlled. Show the prompt again and turn on Allow Remote Interaction."
+        : `${status.permissionError ? `${status.permissionError} ` : ""}This Wayland desktop has to approve screen sharing first. Show the prompt on the host; someone there chooses Share, with Allow Remote Interaction turned on (and Allow Clipboard Access for copy and paste). The choice is remembered.`;
+    return (
+      <View style={styles.banner}>
+        <Text style={styles.bannerText}>{text}</Text>
+        <ToolButton styles={styles} label={waiting ? "Waiting for approval on host…" : requesting ? "Asking…" : "Show prompt on host"} onPress={onRequest} />
+      </View>
+    );
+  }
   // X11 has no permissions to grant; input is only missing when the X server lacks the XTEST extension.
   if (linuxHost) return <Text style={styles.error}>This host's X server has no XTEST extension, so it can be viewed but not controlled.</Text>;
   return (
