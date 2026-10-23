@@ -83,7 +83,8 @@ Anyone paired with the host can see and control its screen while the plugin is e
 
 ## Limitations
 
-- Mac hosts and Linux hosts running X11 are supported; Wayland sessions are not yet. Any Paseo client can view.
+- Mac hosts and Linux hosts running X11 are supported; Wayland sessions are not yet. Any Paseo client can view. Linux support has been tested on an X11 session only. Recent GNOME releases (for example Ubuntu 25.10 and later, Fedora 41 and later) no longer offer an X11 session, so those hosts need a desktop that still does, such as Xfce, MATE, Cinnamon or KDE Plasma on X11.
+- On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` with the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.
 - On Linux, characters outside Latin-1 (such as Cyrillic, Greek or €), and any character the host's keyboard layout lacks, are typed by briefly remapping a spare key. That takes about 30 ms per character, so paste long non-Latin text instead of typing it. Pasting with Ctrl+V does not work in terminals; use Ctrl+Shift+V (⌘⇧V from a Mac).
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.
 - Granting the two macOS permissions needs someone physically at a Mac host once.

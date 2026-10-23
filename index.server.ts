@@ -62,8 +62,10 @@ function unsupportedReason(): string | null {
   if (process.platform === "darwin") return null;
   if (process.platform !== "linux") return "Screen sharing is only available on macOS and Linux hosts.";
   // Through Xwayland, an X11 capture only sees X11 windows, and input does not reach Wayland apps.
-  if (process.env.XDG_SESSION_TYPE === "wayland") {
-    return "This Linux host is running a Wayland session, and screen sharing needs X11 for now. Log out and choose an Xorg session at the login screen (on Ubuntu, \"Ubuntu on Xorg\").";
+  // WAYLAND_DISPLAY also covers compositors started without a login manager, which may leave
+  // XDG_SESSION_TYPE unset (for example Sway or Hyprland launched from a TTY).
+  if (process.env.XDG_SESSION_TYPE === "wayland" || process.env.WAYLAND_DISPLAY) {
+    return "This Linux host is running a Wayland session, and screen sharing needs X11 for now. If your login screen offers an X11 or Xorg session, log out and choose it; recent GNOME releases no longer include one.";
   }
   if (!process.env.DISPLAY) {
     return "The Paseo daemon on this host has no X display (DISPLAY is not set). Start Paseo from the desktop session.";

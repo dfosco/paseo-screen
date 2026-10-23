@@ -212,9 +212,12 @@ function KeyBar({ styles, compact, linuxHost, send, clipboard }: {
   const key = (keyCode: number, modifiers: ScreenModifier[] = []) => () => send({ type: "key", keyCode, modifiers });
   const submit = (withEnter: boolean) => {
     // Text events carry at most 10,000 UTF-16 units each; split on code points so no emoji is cut in half.
+    // A Linux host types characters missing from its layout at about 30 ms each, so it gets small
+    // chunks: each request then finishes well inside the 15 s timeout and other input is not starved.
+    const limit = linuxHost ? 200 : 10_000;
     let chunk = "";
     for (const codePoint of text) {
-      if (chunk.length + codePoint.length > 10_000) {
+      if (chunk.length + codePoint.length > limit) {
         send({ type: "text", text: chunk });
         chunk = "";
       }
