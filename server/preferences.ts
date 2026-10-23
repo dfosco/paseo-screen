@@ -3,7 +3,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 // Host-side viewer preferences. Display IDs stay stable for a given monitor while it is connected.
-const file = path.join(homedir(), "Library", "Application Support", "paseo-screen", "preferences.json");
+const file =
+  process.platform === "darwin"
+    ? path.join(homedir(), "Library", "Application Support", "paseo-screen", "preferences.json")
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), "paseo-screen", "preferences.json");
 
 interface Preferences {
   display?: number;

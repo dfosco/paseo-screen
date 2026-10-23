@@ -8,7 +8,7 @@ import { chooseDisplayRpc, requestPermissionsRpc, statusRpc, type ScreenDisplay,
 import { readLocalClipboard, useHostClipboard } from "./clipboard";
 import { FrameImage } from "./frame-image";
 import { fitContent } from "./geometry";
-import { KEY } from "./keys";
+import { isAppleClient, KEY, keyMapping } from "./keys";
 import { TouchStage } from "./touch-stage";
 import { QUALITIES, useFrames, useInputQueue } from "./use-screen";
 import { useWebInput } from "./web-input";
@@ -59,6 +59,9 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
     frames.wake();
   };
   const canCapture = lastGood.current?.screenRecording === true;
+  const hostPlatform = lastGood.current?.platform ?? "darwin";
+  const linuxHost = hostPlatform === "linux";
+  const mapping = useMemo(() => keyMapping(hostPlatform, isAppleClient()), [hostPlatform]);
   const [stage, setStage] = useState({ width: 0, height: 0 });
   const [rotated, setRotated] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -77,23 +80,26 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
 
   const clipboard = useHostClipboard(controlling);
   const pasteOnHost = useCallback(
-    (text: string) => {
-      send({ type: "paste", text });
+    (text: string, shift = false) => {
+      send(shift ? { type: "paste", text, shift } : { type: "paste", text });
       clipboard.notePasted(text);
     },
     [send, clipboard.notePasted],
   );
-  const pasteLocalClipboard = useCallback(async () => {
-    const text = await readLocalClipboard();
-    if (text) pasteOnHost(text);
-    else clipboard.setMessage("Could not read this device's clipboard");
-  }, [pasteOnHost, clipboard.setMessage]);
+  const pasteLocalClipboard = useCallback(
+    async (shift = false) => {
+      const text = await readLocalClipboard();
+      if (text) pasteOnHost(text, shift);
+      else clipboard.setMessage("Could not read this device's clipboard");
+    },
+    [pasteOnHost, clipboard.setMessage],
+  );
 
   const [viewNode, setViewNode] = useState<unknown>(null);
-  useWebInput(viewNode, isWeb && controlling, send, {
+  useWebInput(viewNode, isWeb && controlling, send, mapping, {
     onHostCopy: clipboard.afterHostCopy,
     onPaste: pasteOnHost,
-    onPasteFallback: () => void pasteLocalClipboard(),
+    onPasteFallback: (shift) => void pasteLocalClipboard(shift),
   });
 
 
@@ -118,7 +124,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
         </Text>
       </View>
 
-      <PermissionBanner styles={styles} status={status.data} loading={status.isLoading} requesting={request.isPending} onRequest={() => request.mutate()} />
+      <PermissionBanner styles={styles} linuxHost={linuxHost} status={status.data} loading={status.isLoading} requesting={request.isPending} onRequest={() => request.mutate()} />
       {frames.error || inputError ? <Text style={styles.error}>{frames.error ?? inputError}</Text> : null}
       {frames.asleep ? (
         <View style={styles.banner}>
@@ -129,9 +135,9 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
       {frames.locked && !frames.asleep ? (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
-            {isWeb
-              ? "This Mac is locked. Click the picture, type your password and press Return to unlock it."
-              : "This Mac is locked. Type your password in the box below and press ⏎ to unlock it."}
+            {`This ${linuxHost ? "computer" : "Mac"} is locked. ${
+              isWeb ? "Click the picture, type your password and press Return to unlock it." : "Type your password in the box below and press ⏎ to unlock it."
+            }`}
           </Text>
         </View>
       ) : null}
@@ -162,6 +168,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
         <KeyBar
           styles={styles}
           compact={layout.compact}
+          linuxHost={linuxHost}
           send={send}
           clipboard={clipboard.supported ? { copyFromHost: clipboard.pull, pasteToHost: () => void pasteLocalClipboard() } : null}
         />
@@ -170,8 +177,9 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   );
 }
 
-function PermissionBanner({ styles, status, loading, requesting, onRequest }: {
+function PermissionBanner({ styles, linuxHost, status, loading, requesting, onRequest }: {
   styles: Styles;
+  linuxHost: boolean;
   status: ScreenStatus | undefined;
   loading: boolean;
   requesting: boolean;
@@ -181,6 +189,8 @@ function PermissionBanner({ styles, status, loading, requesting, onRequest }: {
   if (!status.supported || status.error) return <Text style={styles.error}>{status.error ?? "Unsupported host."}</Text>;
   const missing = [!status.screenRecording && "Screen Recording", !status.accessibility && "Accessibility"].filter(Boolean);
   if (missing.length === 0) return null;
+  // X11 has no permissions to grant; input is only missing when the X server lacks the XTEST extension.
+  if (linuxHost) return <Text style={styles.error}>This host's X server has no XTEST extension, so it can be viewed but not controlled.</Text>;
   return (
     <View style={styles.banner}>
       <Text style={styles.bannerText}>
@@ -191,9 +201,10 @@ function PermissionBanner({ styles, status, loading, requesting, onRequest }: {
   );
 }
 
-function KeyBar({ styles, compact, send, clipboard }: {
+function KeyBar({ styles, compact, linuxHost, send, clipboard }: {
   styles: Styles;
   compact: boolean;
+  linuxHost: boolean;
   send(event: ScreenInputEvent): void;
   clipboard: { copyFromHost(): void; pasteToHost(): void } | null;
 }) {
@@ -230,14 +241,29 @@ function KeyBar({ styles, compact, send, clipboard }: {
       <ToolButton styles={styles} label="Tab" onPress={key(KEY.tab)} />
       <ToolButton styles={styles} label="⏎" onPress={key(KEY.enter)} />
       <ToolButton styles={styles} label="⌫" onPress={key(KEY.backspace)} />
-      <ToolButton styles={styles} label="⌘Tab" onPress={key(KEY.tab, ["cmd"])} />
-      <ToolButton styles={styles} label="⌘Space" onPress={key(KEY.space, ["cmd"])} />
-      <ToolButton styles={styles} label="⌘W" onPress={() => send({ type: "key", char: "w", modifiers: ["cmd"] })} />
-      <ToolButton styles={styles} label="⌘Q" onPress={() => send({ type: "key", char: "q", modifiers: ["cmd"] })} />
-      <ToolButton styles={styles} label="◀ Space" onPress={key(KEY.left, ["ctrl"])} />
-      <ToolButton styles={styles} label="Space ▶" onPress={key(KEY.right, ["ctrl"])} />
-      <ToolButton styles={styles} label="Mission Control" onPress={key(KEY.up, ["ctrl"])} />
-      <ToolButton styles={styles} label="App windows" onPress={key(KEY.down, ["ctrl"])} />
+      {linuxHost ? (
+        // GNOME's default shortcuts; on a Linux host `cmd` is the Super key.
+        <>
+          <ToolButton styles={styles} label="Super+Tab" onPress={key(KEY.tab, ["cmd"])} />
+          <ToolButton styles={styles} label="Activities" onPress={key(KEY.command)} />
+          <ToolButton styles={styles} label="Apps" onPress={() => send({ type: "key", char: "a", modifiers: ["cmd"] })} />
+          <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
+          <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
+          <ToolButton styles={styles} label="◀ Workspace" onPress={key(KEY.left, ["ctrl", "alt"])} />
+          <ToolButton styles={styles} label="Workspace ▶" onPress={key(KEY.right, ["ctrl", "alt"])} />
+        </>
+      ) : (
+        <>
+          <ToolButton styles={styles} label="⌘Tab" onPress={key(KEY.tab, ["cmd"])} />
+          <ToolButton styles={styles} label="⌘Space" onPress={key(KEY.space, ["cmd"])} />
+          <ToolButton styles={styles} label="⌘W" onPress={() => send({ type: "key", char: "w", modifiers: ["cmd"] })} />
+          <ToolButton styles={styles} label="⌘Q" onPress={() => send({ type: "key", char: "q", modifiers: ["cmd"] })} />
+          <ToolButton styles={styles} label="◀ Space" onPress={key(KEY.left, ["ctrl"])} />
+          <ToolButton styles={styles} label="Space ▶" onPress={key(KEY.right, ["ctrl"])} />
+          <ToolButton styles={styles} label="Mission Control" onPress={key(KEY.up, ["ctrl"])} />
+          <ToolButton styles={styles} label="App windows" onPress={key(KEY.down, ["ctrl"])} />
+        </>
+      )}
       {clipboard ? (
         <>
           <ToolButton styles={styles} label="Copy from host" onPress={clipboard.copyFromHost} />

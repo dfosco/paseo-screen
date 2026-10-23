@@ -10,21 +10,30 @@ export default function contribute(server: PluginServerContext) {
   const input = new HelperProcess(log);
 
   async function readStatus(command: "status" | "request"): Promise<ScreenStatus> {
-    const failed = { screenRecording: false, accessibility: false, locked: false, displays: [], preferredDisplay: null };
-    if (process.platform !== "darwin") {
-      return { ...failed, supported: false, error: "Screen sharing is only available on macOS hosts." };
-    }
+    const failed = { platform: process.platform, screenRecording: false, accessibility: false, locked: false, displays: [], preferredDisplay: null };
+    const unsupported = unsupportedReason();
+    if (unsupported) return { ...failed, supported: false, error: unsupported };
     try {
-      const status = await capture.request<Pick<ScreenStatus, "screenRecording" | "accessibility" | "locked" | "displays">>(command);
-      const preferred = await readPreferredDisplay();
+      const status = await capture.request<
+        Pick<ScreenStatus, "screenRecording" | "accessibility" | "locked" | "displays"> & { activeDisplay?: number }
+      >(command);
+      let preferred = await readPreferredDisplay();
+      const connected = (id: number | null) => status.displays.some((display) => display.id === id);
+      // With no choice saved yet, start where the focused window is (Linux helpers report it), and save
+      // that, so the viewer does not follow focus around afterwards.
+      if (preferred === null && status.activeDisplay !== undefined && connected(status.activeDisplay)) {
+        preferred = status.activeDisplay;
+        await writePreferredDisplay(preferred).catch(() => undefined);
+      }
       return {
         supported: true,
         error: null,
+        platform: process.platform,
         screenRecording: status.screenRecording,
         accessibility: status.accessibility,
         locked: status.locked,
         displays: status.displays,
-        preferredDisplay: status.displays.some((display) => display.id === preferred) ? preferred : null,
+        preferredDisplay: connected(preferred) ? preferred : null,
       };
     } catch (error) {
       return { ...failed, supported: true, error: error instanceof Error ? error.message : String(error) };
@@ -46,4 +55,18 @@ export default function contribute(server: PluginServerContext) {
     void capture.stop();
     void input.stop();
   };
+}
+
+/** Why this host cannot share its screen, or null when it can. */
+function unsupportedReason(): string | null {
+  if (process.platform === "darwin") return null;
+  if (process.platform !== "linux") return "Screen sharing is only available on macOS and Linux hosts.";
+  // Through Xwayland, an X11 capture only sees X11 windows, and input does not reach Wayland apps.
+  if (process.env.XDG_SESSION_TYPE === "wayland") {
+    return "This Linux host is running a Wayland session, and screen sharing needs X11 for now. Log out and choose an Xorg session at the login screen (on Ubuntu, \"Ubuntu on Xorg\").";
+  }
+  if (!process.env.DISPLAY) {
+    return "The Paseo daemon on this host has no X display (DISPLAY is not set). Start Paseo from the desktop session.";
+  }
+  return null;
 }

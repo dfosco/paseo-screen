@@ -19,6 +19,8 @@ export type ScreenDisplay = z.infer<typeof displaySchema>;
 
 const statusSchema = z.object({
   supported: z.boolean(),
+  /** The host's Node platform, such as "darwin" or "linux". Absent from hosts running 0.1.x, which are all Macs. */
+  platform: z.string().default("darwin"),
   /** Set when the helper could not be built or started. */
   error: z.string().nullable(),
   screenRecording: z.boolean(),
@@ -26,7 +28,10 @@ const statusSchema = z.object({
   /** The host is showing its lock screen. Absent from hosts running 0.1.0. */
   locked: z.boolean().default(false),
   displays: z.array(displaySchema),
-  /** The display a viewer last chose on this host, if it is still connected. */
+  /**
+   * The display a viewer last chose on this host, if it is still connected. A Linux host with no saved
+   * choice starts with the display showing the focused window.
+   */
   preferredDisplay: z.number().nullable(),
 });
 export type ScreenStatus = z.infer<typeof statusSchema>;
@@ -37,7 +42,10 @@ export const statusRpc = defineRpc({
   output: statusSchema,
 });
 
-/** Shows the macOS permission prompts on the host and opens System Settings when a prompt is no longer offered. */
+/**
+ * Shows the macOS permission prompts on the host and opens System Settings when a prompt is no longer offered.
+ * Linux (X11) hosts need no permissions, so this only reads the status there.
+ */
 export const requestPermissionsRpc = defineRpc({
   name: "screen.request-permissions",
   input: z.object({}),
@@ -75,6 +83,7 @@ const point = { x: z.number().min(0).max(1), y: z.number().min(0).max(1) };
 /** Pointer positions during a drag may leave the viewed display (below 0 or above 1) to continue onto a neighbouring one. */
 const dragPoint = { x: z.number().min(-4).max(5), y: z.number().min(-4).max(5) };
 const button = z.enum(["left", "right", "middle"]);
+/** `cmd` is Command on a macOS host and the Super (Windows) key on a Linux host. */
 const modifier = z.enum(["cmd", "shift", "alt", "ctrl", "fn"]);
 const modifiers = z.array(modifier).optional();
 
@@ -85,7 +94,8 @@ export const inputEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("click"), ...point, button, count: z.number().int().min(1).max(3).optional(), modifiers }),
   z.object({ type: z.literal("scroll"), x: point.x.optional(), y: point.y.optional(), dx: z.number().min(-10_000).max(10_000), dy: z.number().min(-10_000).max(10_000) }),
   /**
-   * A macOS virtual key code (a physical key position), or `char`, a character the host maps to a key
+   * A macOS virtual key code (a physical key position; a Linux host presses the key in the same position),
+   * or `char`, a character the host maps to a key
    * on its own keyboard layout. Omit `down` to press and release.
    */
   z
@@ -98,8 +108,11 @@ export const inputEventSchema = z.discriminatedUnion("type", [
     })
     .refine((event) => event.keyCode !== undefined || event.char !== undefined, "key needs keyCode or char"),
   z.object({ type: z.literal("text"), text: z.string().max(10_000) }),
-  /** Sets the host clipboard to `text`, then presses Cmd+V on the host. */
-  z.object({ type: z.literal("paste"), text: z.string().max(1_000_000) }),
+  /**
+   * Sets the host clipboard to `text`, then presses Cmd+V on a macOS host or Ctrl+V on a Linux host.
+   * With `shift`, a Linux host presses Ctrl+Shift+V, which terminals use.
+   */
+  z.object({ type: z.literal("paste"), text: z.string().max(1_000_000), shift: z.boolean().optional() }),
 ]);
 export type ScreenInputEvent = z.infer<typeof inputEventSchema>;
 export type ScreenModifier = z.infer<typeof modifier>;

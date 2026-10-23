@@ -5,14 +5,24 @@ import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { HELPER_SOURCE, HELPER_SOURCE_HASH } from "./helper-source.generated";
+import { HELPERS } from "./helper-source.generated";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 /** After a failed build, wait this long before trying again, so status polling does not retry constantly. */
 const BUILD_RETRY_MS = 60_000;
-const CACHE_ROOT = path.join(homedir(), "Library", "Caches", "paseo-screen");
+const CACHE_ROOT =
+  process.platform === "darwin"
+    ? path.join(homedir(), "Library", "Caches", "paseo-screen")
+    : path.join(process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache"), "paseo-screen");
+/** The helper for this host: Swift with ScreenCaptureKit on macOS, C with X11 on Linux. */
+const HELPER = process.platform === "linux" ? HELPERS.linux : HELPERS.darwin;
+const LINUX_PACKAGES = [
+  "Debian or Ubuntu: sudo apt install gcc libx11-dev libxext-dev libxtst-dev libxrandr-dev libxfixes-dev libjpeg-dev.",
+  "Fedora: sudo dnf install gcc libX11-devel libXext-devel libXtst-devel libXrandr-devel libXfixes-devel libjpeg-turbo-devel.",
+  "Arch: sudo pacman -S gcc libx11 libxext libxtst libxrandr libxfixes libjpeg-turbo.",
+].join(" ");
 
-/** Compiles the embedded Swift helper once per source revision and returns the binary path. */
+/** Compiles the embedded helper once per source revision and returns the binary path. */
 let buildPromise: Promise<string> | null = null;
 let lastFailure: { at: number; error: unknown } | null = null;
 export function ensureHelperBinary(): Promise<string> {
@@ -32,21 +42,42 @@ export function ensureHelperBinary(): Promise<string> {
 }
 
 async function buildHelper(): Promise<string> {
-  const dir = path.join(CACHE_ROOT, HELPER_SOURCE_HASH);
+  const dir = path.join(CACHE_ROOT, HELPER.hash);
   const binary = path.join(dir, "paseo-screen-helper");
   if (existsSync(binary)) return binary;
+  await mkdir(dir, { recursive: true });
+  const source = path.join(dir, HELPER.file);
+  const partial = `${binary}.partial`;
+  await writeFile(source, HELPER.source);
+  if (process.platform === "linux") await compileLinuxHelper(source, partial);
+  else await compileMacHelper(source, partial);
+  await rename(partial, binary);
+  await removeOldBuilds();
+  return binary;
+}
+
+async function compileLinuxHelper(source: string, output: string): Promise<void> {
+  const libraries = ["-lX11", "-lXext", "-lXtst", "-lXrandr", "-lXfixes", "-ljpeg", "-lpthread", "-lm"];
+  try {
+    await execCommand(process.env.CC || "cc", ["-O2", "-std=gnu11", "-o", output, source, ...libraries], {
+      timeout: 300_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not build the screen helper. It needs a C compiler and the X11 and JPEG development packages. ${LINUX_PACKAGES} ${detail}`);
+  }
+}
+
+async function compileMacHelper(source: string, output: string): Promise<void> {
   // `xcode-select -p` only reports; calling xcrun without the tools would pop up the macOS install prompt.
   try {
     await execCommand("/usr/bin/xcode-select", ["-p"], { timeout: 10_000 });
   } catch {
     throw new Error("The Xcode command line tools are needed to build the screen helper. Run `xcode-select --install` on the host, then reopen the screen.");
   }
-  await mkdir(dir, { recursive: true });
-  const source = path.join(dir, "main.swift");
-  const partial = `${binary}.partial`;
-  await writeFile(source, HELPER_SOURCE);
   try {
-    await execCommand("xcrun", ["swiftc", "-O", "-swift-version", "5", "-o", partial, source], {
+    await execCommand("xcrun", ["swiftc", "-O", "-swift-version", "5", "-o", output, source], {
       timeout: 300_000,
       maxBuffer: 4 * 1024 * 1024,
     });
@@ -54,16 +85,13 @@ async function buildHelper(): Promise<string> {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not build the screen helper. Install the Xcode command line tools (xcode-select --install). ${detail}`);
   }
-  await rename(partial, binary);
-  await removeOldBuilds();
-  return binary;
 }
 
 /** Deletes helpers built from earlier source revisions. */
 async function removeOldBuilds(): Promise<void> {
   const entries = await readdir(CACHE_ROOT).catch(() => [] as string[]);
   await Promise.all(
-    entries.filter((name) => name !== HELPER_SOURCE_HASH).map((name) => rm(path.join(CACHE_ROOT, name), { recursive: true, force: true })),
+    entries.filter((name) => name !== HELPER.hash).map((name) => rm(path.join(CACHE_ROOT, name), { recursive: true, force: true })),
   );
 }
 

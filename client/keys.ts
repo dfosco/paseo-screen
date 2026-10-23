@@ -1,4 +1,8 @@
+import { Platform } from "react-native";
 import type { ScreenModifier } from "../shared/rpc";
+
+// This plugin typechecks without the DOM library. Declare only what this module uses.
+declare const navigator: { platform?: string; userAgent?: string } | undefined;
 
 /** KeyboardEvent.code to macOS virtual key code (Carbon kVK_* values). Physical positions, so the host layout decides the character. */
 export const MAC_KEY_CODES: Record<string, number> = {
@@ -24,6 +28,9 @@ export const KEY = {
   space: 49,
   backspace: 51,
   escape: 53,
+  /** Left Command on a macOS host, left Super on a Linux host. */
+  command: 55,
+  f4: 118,
   left: 123,
   right: 124,
   down: 125,
@@ -37,11 +44,45 @@ export interface ModifierState {
   ctrlKey: boolean;
 }
 
-export function modifiersOf(event: ModifierState): ScreenModifier[] {
+/** True when this client is a Mac, iPhone or iPad, where Command is the shortcut key. */
+export function isAppleClient(): boolean {
+  if (Platform.OS === "ios") return true;
+  if (typeof navigator === "undefined") return false;
+  return /^(Mac|iPhone|iPad)/.test(navigator.platform ?? "") || /Macintosh|iPhone|iPad/.test(navigator.userAgent ?? "");
+}
+
+/**
+ * How this client's keys become host shortcuts. A Mac client's Command key is the Mac host's Command,
+ * but on a Linux host it is sent as Ctrl, the shortcut key there. Other clients' Ctrl stays Ctrl, and
+ * their Super (Windows) key is sent as `cmd`, which is Command on a Mac host and Super on a Linux host.
+ */
+export interface KeyMapping {
+  commandAsCtrl: boolean;
+  /** Whether a paste or copy shortcut is held: Command, or Ctrl when a non-Apple client controls a Linux host. */
+  shortcut(event: ModifierState): boolean;
+  /**
+   * Send each key press as a press and release. An X server repeats a key held through XTest, so a
+   * key-up that arrives late or never would keep typing; this client's own key repeat still repeats keys.
+   */
+  tapKeys: boolean;
+}
+
+export function keyMapping(hostPlatform: string, appleClient: boolean): KeyMapping {
+  const linuxHost = hostPlatform === "linux";
+  const ctrlShortcut = linuxHost && !appleClient;
+  return {
+    commandAsCtrl: linuxHost && appleClient,
+    shortcut: (event) => (ctrlShortcut ? event.ctrlKey : event.metaKey),
+    tapKeys: linuxHost,
+  };
+}
+
+export function modifiersOf(event: ModifierState, mapping?: KeyMapping): ScreenModifier[] {
   const result: ScreenModifier[] = [];
-  if (event.metaKey) result.push("cmd");
+  const commandAsCtrl = mapping?.commandAsCtrl === true;
+  if (event.metaKey && !commandAsCtrl) result.push("cmd");
   if (event.shiftKey) result.push("shift");
   if (event.altKey) result.push("alt");
-  if (event.ctrlKey) result.push("ctrl");
+  if (event.ctrlKey || (event.metaKey && commandAsCtrl)) result.push("ctrl");
   return result;
 }

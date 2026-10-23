@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ScreenInputEvent } from "../shared/rpc";
-import { MAC_KEY_CODES, modifiersOf, type ModifierState } from "./keys";
+import { MAC_KEY_CODES, modifiersOf, type KeyMapping, type ModifierState } from "./keys";
 
 // This plugin typechecks without the DOM library. Declare only what this module uses.
 interface DomRect { left: number; top: number; width: number; height: number }
@@ -37,15 +37,21 @@ function isDomElement(node: unknown): node is DomElement {
  * `node` is the element that shows the remote screen; react-native-web refs resolve to DOM elements.
  */
 export interface WebInputHandlers {
-  /** Called after Cmd+C or Cmd+X is sent to the host. */
+  /** Called after the copy or cut shortcut (Cmd+C or Cmd+X; Ctrl on a Linux host from a non-Apple client) is sent to the host. */
   onHostCopy(): void;
-  /** Pastes local clipboard text on the host. */
-  onPaste(text: string): void;
-  /** Called when Cmd+V produced no paste event, so the caller can read the clipboard another way. */
-  onPasteFallback(): void;
+  /** Pastes local clipboard text on the host. `shift` is set when Shift was held with the paste shortcut. */
+  onPaste(text: string, shift: boolean): void;
+  /** Called when the paste shortcut produced no paste event, so the caller can read the clipboard another way. */
+  onPasteFallback(shift: boolean): void;
 }
 
-export function useWebInput(node: unknown, enabled: boolean, send: (event: ScreenInputEvent) => void, handlers: WebInputHandlers): void {
+export function useWebInput(
+  node: unknown,
+  enabled: boolean,
+  send: (event: ScreenInputEvent) => void,
+  mapping: KeyMapping,
+  handlers: WebInputHandlers,
+): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   useEffect(() => {
@@ -79,13 +85,13 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       pressed += 1;
       lastButton = button(event);
       lastPoint = at(event);
-      send({ type: "down", ...at(event), button: button(event), clickCount: Math.max(1, event.detail), modifiers: modifiersOf(event) });
+      send({ type: "down", ...at(event), button: button(event), clickCount: Math.max(1, event.detail), modifiers: modifiersOf(event, mapping) });
     };
     const onMouseUp = (event: DomMouseEvent) => {
       if (pressed === 0) return;
       pressed -= 1;
       event.preventDefault();
-      send({ type: "up", ...at(event, true), button: button(event), clickCount: Math.max(1, event.detail), modifiers: modifiersOf(event) });
+      send({ type: "up", ...at(event, true), button: button(event), clickCount: Math.max(1, event.detail), modifiers: modifiersOf(event, mapping) });
     };
     const onElementMouseMove = (event: DomMouseEvent) => {
       if (pressed === 0) send({ type: "move", ...at(event) });
@@ -103,33 +109,40 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       send({ type: "scroll", ...at(event), dx: clamp(event.deltaX), dy: clamp(event.deltaY) });
     };
     const onContextMenu = (event: DomMouseEvent) => event.preventDefault();
-    // Cmd+V is not forwarded as a key. The browser's paste event carries this client's clipboard,
-    // which is put on the host clipboard and pasted there. If no paste event arrives, fall back.
+    // The paste shortcut is not forwarded as a key. The browser's paste event carries this client's
+    // clipboard, which is put on the host clipboard and pasted there. If no paste event arrives, fall back.
     let pasteTimer: ReturnType<typeof setTimeout> | undefined;
+    let pasteShift = false;
     const cmdTapped = new Set<string>();
     const onKey = (down: boolean) => (event: DomKeyboardEvent) => {
       // A key pressed again without Cmd is a normal press, even if its last Cmd press never sent a keyup.
       if (down && !event.metaKey) cmdTapped.delete(event.code);
-      if (event.metaKey && event.code === "KeyV") {
+      if (mapping.shortcut(event) && event.code === "KeyV") {
         if (down && !event.repeat) {
           clearTimeout(pasteTimer);
-          pasteTimer = setTimeout(() => handlersRef.current.onPasteFallback(), 200);
+          pasteShift = event.shiftKey;
+          pasteTimer = setTimeout(() => {
+            handlersRef.current.onPasteFallback(pasteShift);
+            pasteShift = false;
+          }, 200);
         }
         return;
       }
       const keyCode = MAC_KEY_CODES[event.code];
       event.preventDefault();
       if (keyCode === undefined) return;
-      // Mac browsers send no keyup for a key released while Cmd is held, so a Cmd shortcut is
-      // sent as one press-and-release and its keyup, if one comes, is dropped.
-      if (!down && cmdTapped.delete(event.code)) return;
-      if (down && event.metaKey) {
+      if (mapping.tapKeys) {
+        // Key-ups are dropped: each press (and each of this client's repeats) is a whole tap on the host.
+        if (down) send({ type: "key", keyCode, modifiers: modifiersOf(event, mapping) });
+      } else if (down && event.metaKey) {
+        // Mac browsers send no keyup for a key released while Cmd is held, so a Cmd shortcut is
+        // sent as one press-and-release and its keyup, if one comes, is dropped.
         cmdTapped.add(event.code);
-        send({ type: "key", keyCode, modifiers: modifiersOf(event) });
-      } else {
-        send({ type: "key", keyCode, down, modifiers: modifiersOf(event) });
+        send({ type: "key", keyCode, modifiers: modifiersOf(event, mapping) });
+      } else if (down || !cmdTapped.delete(event.code)) {
+        send({ type: "key", keyCode, down, modifiers: modifiersOf(event, mapping) });
       }
-      if (down && event.metaKey && (event.code === "KeyC" || event.code === "KeyX")) handlersRef.current.onHostCopy();
+      if (down && mapping.shortcut(event) && (event.code === "KeyC" || event.code === "KeyX")) handlersRef.current.onHostCopy();
     };
     const onKeyDown = onKey(true);
     const onKeyUp = onKey(false);
@@ -137,7 +150,8 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       clearTimeout(pasteTimer);
       const text = event.clipboardData?.getData("text/plain");
       event.preventDefault();
-      if (text) handlersRef.current.onPaste(text);
+      if (text) handlersRef.current.onPaste(text, pasteShift);
+      pasteShift = false;
     };
 
     const listeners: [string, (event: never) => void, { passive?: boolean }?][] = [
@@ -163,5 +177,5 @@ export function useWebInput(node: unknown, enabled: boolean, send: (event: Scree
       for (const [type, listener] of listeners) element.removeEventListener(type, listener);
       for (const [type, listener] of documentListeners) doc.removeEventListener(type, listener);
     };
-  }, [node, enabled, send]);
+  }, [node, enabled, send, mapping]);
 }
