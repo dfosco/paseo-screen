@@ -48,7 +48,7 @@ export function TouchStage({ uri, stage, content, rotated, controlling, send, on
   const latest = useRef({ view, stage, controlling, send });
   latest.current = { view, stage, controlling, send };
   const gesture = useRef<Gesture>({ mode: "idle" });
-  const lastTap = useRef<{ at: number; x: number; y: number } | null>(null);
+  const lastTap = useRef<{ at: number; x: number; y: number; point: { x: number; y: number } } | null>(null);
 
   const responder = useMemo(() => {
     const endTap = () => {
@@ -66,13 +66,14 @@ export function TouchStage({ uri, stage, content, rotated, controlling, send, on
       const now = Date.now();
       const previous = lastTap.current;
       if (previous && now - previous.at < DOUBLE_TAP_MS && Math.hypot(touch.x - previous.x, touch.y - previous.y) < 24) {
-        // The first tap already clicked once; this press is the second click of a double-click.
-        send({ type: "down", ...point, button, clickCount: 2 });
-        send({ type: "up", ...point, button, clickCount: 2 });
+        // The first tap already clicked once; this press is the second click of a double-click. It lands
+        // where the first did: Windows and X11 only count a double-click within a few pixels.
+        send({ type: "down", ...previous.point, button, clickCount: 2 });
+        send({ type: "up", ...previous.point, button, clickCount: 2 });
         lastTap.current = null;
       } else {
         send({ type: "click", ...point, button });
-        lastTap.current = { at: now, x: touch.x, y: touch.y };
+        lastTap.current = { at: now, x: touch.x, y: touch.y, point };
       }
     };
     const startPinch = (touches: Touch[]) => {

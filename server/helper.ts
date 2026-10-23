@@ -55,8 +55,9 @@ async function buildHelper(): Promise<string> {
   if (process.platform === "linux") await compileLinuxHelper(source, partial);
   else if (process.platform === "win32") await compileWindowsHelper(source, partial);
   else await compileMacHelper(source, partial);
-  await rename(partial, binary);
-  await removeOldBuilds();
+  await renameWithRetry(partial, binary);
+  // Best effort: an old helper that is still running, or a virus scan, can hold its files on Windows.
+  await removeOldBuilds().catch(() => undefined);
   return binary;
 }
 
@@ -68,7 +69,7 @@ async function compileLinuxHelper(source: string, output: string): Promise<void>
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = buildFailure(error);
     throw new Error(`Could not build the screen helper. It needs a C compiler and the X11 and JPEG development packages. ${LINUX_PACKAGES} ${detail}`);
   }
 }
@@ -91,7 +92,7 @@ async function compileWindowsHelper(source: string, output: string): Promise<voi
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = buildFailure(error);
     throw new Error(`Could not build the screen helper with ${compiler}. ${detail}`);
   }
 }
@@ -109,9 +110,30 @@ async function compileMacHelper(source: string, output: string): Promise<void> {
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = buildFailure(error);
     throw new Error(`Could not build the screen helper. Install the Xcode command line tools (xcode-select --install). ${detail}`);
   }
+}
+
+/** Renames, retrying briefly while Windows holds the new file (for example during a virus scan). */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt >= 10 || (code !== "EBUSY" && code !== "EPERM" && code !== "EACCES")) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+}
+
+/** A failed compiler run's message, with its output: csc.exe reports errors on stdout, not stderr. */
+function buildFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stdout = typeof (error as { stdout?: unknown }).stdout === "string" ? ((error as { stdout: string }).stdout).trim() : "";
+  return stdout && !message.includes(stdout) ? `${message}\n${stdout.slice(-2000)}` : message;
 }
 
 /** Deletes helpers built from earlier source revisions. */
