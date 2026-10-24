@@ -95,7 +95,7 @@ This works while someone is logged in to the desktop and the screen is unlocked.
 
 - **Logging in.** After a reboot nobody is logged in until someone signs in at the machine, and the viewer reports that there is no desktop session. Automatic login (on GNOME, Settings → System → Users) avoids that, but leaves the machine signed in for anyone who picks it up.
 - **The lock screen.** GNOME ends screen sharing when the screen locks and refuses to start it while locked, so a locked GNOME host can't be unlocked from the viewer. The approval is kept: once someone unlocks the screen at the host, the next viewer resumes without a dialog. Turning off automatic screen lock (Settings → Privacy & Security → Screen Lock) keeps an unattended machine shareable, with the same trade-off.
-- **Stopping sharing.** Stopping sharing from the desktop's sharing indicator drops the approval, so sharing stays off until someone at the host approves the dialog again.
+- **Stopping sharing.** Stopping sharing from the desktop's sharing indicator drops the approval, so sharing stays off until someone at the host approves the dialog again. GNOME reports the lock only just after it ends sharing, so the plugin tells a stop from a lock 2 seconds later: stopping sharing and locking the screen within those 2 seconds counts as a lock, and sharing resumes after unlock.
 - **A laptop with its lid closed** and no external monitor is untested.
 
 ### A virtual desktop for headless machines

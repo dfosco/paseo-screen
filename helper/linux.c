@@ -651,15 +651,24 @@ static bool system_bus_call(const char *object, const char *interface, const cha
   return pclose(pipe) == 0 && n > 0;
 }
 
-/// logind's LockedHint: 1 locked, 0 unlocked, -1 unknown. session/auto is the caller's own session,
-/// or the user's graphical one for a daemon outside any session. GNOME sets the hint the moment the
-/// screen locks; the screensaver's GetActive only turns true once the screen has faded to black,
-/// and false again while the password prompt shows.
+/// logind's LockedHint for the user's graphical session: 1 locked, 0 unlocked, -1 unknown. That is
+/// the user's Display session, not the caller's (a daemon started over SSH is in an SSH session that
+/// never locks). GNOME sets the hint the moment the screen locks; the screensaver's GetActive only
+/// turns true once the screen has faded to black, and false again while the password prompt shows.
 static int session_locked_hint(void) {
-  char output[64];
-  if (!system_bus_call("/org/freedesktop/login1/session/auto", "org.freedesktop.login1.Session", "LockedHint", output,
-                       sizeof output))
+  char output[256];
+  if (!system_bus_call("/org/freedesktop/login1/user/self", "org.freedesktop.login1.User", "Display", output, sizeof output))
     return -1;
+  // (<('2', objectpath '/org/freedesktop/login1/session/_32')>,)
+  const char *start = strstr(output, "objectpath '");
+  if (!start) return -1;
+  start += strlen("objectpath '");
+  char path[128];
+  size_t length = strspn(start, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/");
+  if (length == 0 || length >= sizeof path || start[length] != '\'') return -1;
+  memcpy(path, start, length);
+  path[length] = 0;
+  if (!system_bus_call(path, "org.freedesktop.login1.Session", "LockedHint", output, sizeof output)) return -1;
   return strstr(output, "true") != NULL;
 }
 
@@ -1639,8 +1648,7 @@ enum { CLOSE_NONE, CLOSE_PENDING, CLOSE_STOPPED, CLOSE_LOCKED };
 static int close_kind = CLOSE_NONE;
 static bool resume_when_unlocked;  // an approved session was interrupted by the lock screen
 static bool locked_at_close;       // the lock screen was already up when the desktop closed it
-static char *closed_token;         // the restore token saved when the desktop closed it
-static bool start_without_token;   // the next start must not use the saved token
+static char closing_file[1100];    // where the approval waits while a close is told apart
 static char token_file[1024];
 
 static GMutex clip_lock;
@@ -1874,24 +1882,23 @@ static gboolean classify_close(gpointer data) {
     return G_SOURCE_REMOVE;
   }
   if (locked || locked_at_close) {
-    // GNOME ends every sharing session when the screen locks. The approval stands, so sharing
-    // resumes silently once the screen is unlocked.
+    // GNOME ends every sharing session when the screen locks. The approval stands, unless a newer
+    // one replaced it meanwhile, and sharing resumes silently once the screen is unlocked.
     close_kind = CLOSE_LOCKED;
     resume_when_unlocked = true;
+    if (g_file_test(token_file, G_FILE_TEST_EXISTS)) unlink(closing_file);
+    else rename(closing_file, token_file);
   } else {
     // The host stopped sharing (from the desktop's sharing indicator, say). Sharing resumes only
-    // once someone there approves again, so the token that would skip the dialog is dropped now,
-    // before a helper restart could use it. A token from a newer approval is kept.
+    // once someone there approves again.
     close_kind = CLOSE_STOPPED;
     resume_when_unlocked = false;
-    char *current = read_restore_token();
-    if (closed_token && current && !strcmp(current, closed_token)) unlink(token_file);
-    g_free(current);
+    unlink(closing_file);
   }
+  fprintf(stderr, "sharing ended on the host: %s (lock screen %s at the close, %s 2 s later)\n",
+          close_kind == CLOSE_LOCKED ? "screen locked" : "stopped", locked_at_close ? "up" : "not up", locked ? "up" : "not up");
   if (session_state == SESSION_NONE && !strcmp(session_error, ENDED_MESSAGE))
     snprintf(session_error, sizeof session_error, "%s", closed_message());
-  g_free(closed_token);
-  closed_token = NULL;
   g_mutex_unlock(&session_lock);
   return G_SOURCE_REMOVE;
 }
@@ -1916,16 +1923,16 @@ static void on_session_closed(GDBusConnection *connection, const char *sender, c
     g_mutex_unlock(&session_lock);
     return;
   }
+  // Until the close is told apart, the approval waits beside the token file: a start meanwhile
+  // asks the host again, and a helper stopped meanwhile leaves it unused (main drops leftovers).
+  // The token file only ever holds the latest approval, so a later close moves that one aside.
+  rename(token_file, closing_file);
   bool first = close_kind != CLOSE_PENDING;
   close_kind = CLOSE_PENDING;
-  if (first) {
-    g_free(closed_token);
-    closed_token = read_restore_token();
-  }
+  if (first) locked_at_close = false;
   g_mutex_unlock(&session_lock);
   if (!first) return;
-  // Whether the host stopped sharing or the screen locked is told apart now and again a moment
-  // later, when the lock screen (if that was the cause) is surely up.
+  // Told apart now and again a moment later, when the lock screen (if that was the cause) is up.
   bool locked = lock_screen_active();
   g_mutex_lock(&session_lock);
   locked_at_close = locked;
@@ -2050,8 +2057,7 @@ static int read_streams(GVariant *results, Stream *out) {
 static gpointer start_session(gpointer data) {
   const unsigned id = GPOINTER_TO_UINT(data);
   g_mutex_lock(&session_lock);
-  // Right after the host stopped sharing, until that is confirmed, the old approval is not reused.
-  char *saved = start_without_token ? NULL : read_restore_token();
+  char *saved = read_restore_token();
   g_mutex_unlock(&session_lock);
   char *handle = NULL;
   guint subscription = 0;
@@ -2237,8 +2243,7 @@ static void begin_session(void) {
   session_error[0] = 0;
   start_running = true;
   start_closed = false;
-  start_without_token = close_kind == CLOSE_PENDING;
-  if (!start_without_token) close_kind = CLOSE_NONE;
+  if (close_kind != CLOSE_PENDING) close_kind = CLOSE_NONE;  // a pending close is still told apart
   resume_when_unlocked = false;
   g_thread_unref(g_thread_new("portal-start", start_session, GUINT_TO_POINTER(++attempt_id)));
 }
@@ -2759,12 +2764,14 @@ static bool handle_input(const Json *request, Buf *out) {
 // MARK: - Wayland: status
 
 static void status(Buf *out) {
+  // Asked before taking the lock: it may spawn gdbus, and input should not wait for that.
+  bool locked = screen_locked();
   g_mutex_lock(&session_lock);
   refresh_session();
   bool ready = session_state == SESSION_READY;
   buf_printf(out, "\"backend\":\"wayland\",\"screenRecording\":%s,\"accessibility\":%s,\"awaitingApproval\":%s,\"locked\":%s,\"displays\":[",
              ready ? "true" : "false", ready && (session_devices & (DEVICE_POINTER | DEVICE_KEYBOARD)) ? "true" : "false",
-             session_state == SESSION_STARTING ? "true" : "false", screen_locked() ? "true" : "false");
+             session_state == SESSION_STARTING ? "true" : "false", locked ? "true" : "false");
   for (int i = 0; ready && i < stream_count; i++) {
     if (i) buf_puts(out, ",");
     update_pixel_size(&streams[i]);
@@ -2974,6 +2981,9 @@ int main(void) {
   }
   const char *config = g_get_user_config_dir();
   snprintf(token_file, sizeof token_file, "%s/paseo-screen/wayland-restore-token", config);
+  snprintf(closing_file, sizeof closing_file, "%s.closing", token_file);
+  // An approval left aside by a helper that stopped before telling a close apart counts as stopped.
+  unlink(closing_file);
   loop = g_main_loop_new(NULL, FALSE);
   if (bus) {
     // Clipboard signals are for any session of ours; the handlers check what they need.
