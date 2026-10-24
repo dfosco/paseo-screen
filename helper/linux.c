@@ -651,23 +651,15 @@ static bool system_bus_call(const char *object, const char *interface, const cha
   return pclose(pipe) == 0 && n > 0;
 }
 
-/// logind's LockedHint for the user's graphical session: 1 locked, 0 unlocked, -1 unknown. GNOME
-/// sets it the moment the screen locks; the screensaver's GetActive only turns true once the screen
-/// has faded to black, and false again while the password prompt shows.
+/// logind's LockedHint: 1 locked, 0 unlocked, -1 unknown. session/auto is the caller's own session,
+/// or the user's graphical one for a daemon outside any session. GNOME sets the hint the moment the
+/// screen locks; the screensaver's GetActive only turns true once the screen has faded to black,
+/// and false again while the password prompt shows.
 static int session_locked_hint(void) {
-  char output[256];
-  if (!system_bus_call("/org/freedesktop/login1/user/self", "org.freedesktop.login1.User", "Display", output, sizeof output))
+  char output[64];
+  if (!system_bus_call("/org/freedesktop/login1/session/auto", "org.freedesktop.login1.Session", "LockedHint", output,
+                       sizeof output))
     return -1;
-  // (<('2', objectpath '/org/freedesktop/login1/session/_32')>,)
-  const char *start = strstr(output, "objectpath '");
-  if (!start) return -1;
-  start += strlen("objectpath '");
-  char path[128];
-  size_t length = strspn(start, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/");
-  if (length == 0 || length >= sizeof path || start[length] != '\'') return -1;
-  memcpy(path, start, length);
-  path[length] = 0;
-  if (!system_bus_call(path, "org.freedesktop.login1.Session", "LockedHint", output, sizeof output)) return -1;
   return strstr(output, "true") != NULL;
 }
 
@@ -687,13 +679,22 @@ static bool screen_locked(void) {
   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
   static double checked_at = -100;
   static bool locked = false;
+  static bool refreshing = false;
+  // One caller refreshes, outside the mutex; the others get the last answer meanwhile.
   pthread_mutex_lock(&lock);
   double now = now_seconds();
-  if (now - checked_at >= 2) {
+  bool refresh = now - checked_at >= 2 && !refreshing;
+  if (refresh) {
     checked_at = now;
-    locked = lock_screen_active();
+    refreshing = true;
   }
   bool result = locked;
+  pthread_mutex_unlock(&lock);
+  if (!refresh) return result;
+  result = lock_screen_active();
+  pthread_mutex_lock(&lock);
+  locked = result;
+  refreshing = false;
   pthread_mutex_unlock(&lock);
   return result;
 }
@@ -1637,6 +1638,9 @@ static bool auto_start = true;  // whether a saved token may start a session wit
 enum { CLOSE_NONE, CLOSE_PENDING, CLOSE_STOPPED, CLOSE_LOCKED };
 static int close_kind = CLOSE_NONE;
 static bool resume_when_unlocked;  // an approved session was interrupted by the lock screen
+static bool locked_at_close;       // the lock screen was already up when the desktop closed it
+static char *closed_token;         // the restore token saved when the desktop closed it
+static bool start_without_token;   // the next start must not use the saved token
 static char token_file[1024];
 
 static GMutex clip_lock;
@@ -1861,12 +1865,15 @@ static const char *closed_message(void) {
 }
 
 /// Runs on the main loop a moment after the desktop closed a session, once the lock screen (if
-/// that was the cause) is up. `data` is the restore token that was saved at the time.
+/// that was the cause) is up. The lock screen showing at either moment counts.
 static gboolean classify_close(gpointer data) {
-  char *closed_token = data;
   bool locked = lock_screen_active();
   g_mutex_lock(&session_lock);
-  if (locked) {
+  if (close_kind != CLOSE_PENDING) {
+    g_mutex_unlock(&session_lock);
+    return G_SOURCE_REMOVE;
+  }
+  if (locked || locked_at_close) {
     // GNOME ends every sharing session when the screen locks. The approval stands, so sharing
     // resumes silently once the screen is unlocked.
     close_kind = CLOSE_LOCKED;
@@ -1883,8 +1890,9 @@ static gboolean classify_close(gpointer data) {
   }
   if (session_state == SESSION_NONE && !strcmp(session_error, ENDED_MESSAGE))
     snprintf(session_error, sizeof session_error, "%s", closed_message());
-  g_mutex_unlock(&session_lock);
   g_free(closed_token);
+  closed_token = NULL;
+  g_mutex_unlock(&session_lock);
   return G_SOURCE_REMOVE;
 }
 
@@ -1904,10 +1912,25 @@ static void on_session_closed(GDBusConnection *connection, const char *sender, c
     if (start_waiter) finish_wait(start_waiter, 2, NULL);
     ours = true;
   }
-  if (ours) close_kind = CLOSE_PENDING;
+  if (!ours) {
+    g_mutex_unlock(&session_lock);
+    return;
+  }
+  bool first = close_kind != CLOSE_PENDING;
+  close_kind = CLOSE_PENDING;
+  if (first) {
+    g_free(closed_token);
+    closed_token = read_restore_token();
+  }
   g_mutex_unlock(&session_lock);
-  // Whether the host stopped sharing or the screen locked is told apart a moment later.
-  if (ours) g_timeout_add_seconds(2, classify_close, read_restore_token());
+  if (!first) return;
+  // Whether the host stopped sharing or the screen locked is told apart now and again a moment
+  // later, when the lock screen (if that was the cause) is surely up.
+  bool locked = lock_screen_active();
+  g_mutex_lock(&session_lock);
+  locked_at_close = locked;
+  g_mutex_unlock(&session_lock);
+  g_timeout_add_seconds(2, classify_close, NULL);
 }
 
 static void close_portal_session(const char *handle) {
@@ -2026,7 +2049,10 @@ static int read_streams(GVariant *results, Stream *out) {
 /// stays this thread's until a working session is published, and is closed again on any failure.
 static gpointer start_session(gpointer data) {
   const unsigned id = GPOINTER_TO_UINT(data);
-  char *saved = read_restore_token();
+  g_mutex_lock(&session_lock);
+  // Right after the host stopped sharing, until that is confirmed, the old approval is not reused.
+  char *saved = start_without_token ? NULL : read_restore_token();
+  g_mutex_unlock(&session_lock);
   char *handle = NULL;
   guint subscription = 0;
   int fd = -1;
@@ -2110,8 +2136,10 @@ static gpointer start_session(gpointer data) {
   if (code != 0) goto done;
   started = true;
   const char *restore = NULL;
+  g_mutex_lock(&session_lock);  // classify_close reads and unlinks the token under the lock
   if (g_variant_lookup(results, "restore_token", "&s", &restore)) save_restore_token(restore);
   else if (saved) unlink(token_file);  // used up, and would bring up a dialog nobody asked for
+  g_mutex_unlock(&session_lock);
   g_variant_lookup(results, "devices", "u", &devices);
   g_variant_lookup(results, "clipboard_enabled", "b", &clipboard);
   code = 3;
@@ -2174,7 +2202,7 @@ static gpointer start_session(gpointer data) {
 done:
   if (!published) {
     // GNOME refuses new sessions while the screen is locked; that says nothing about the token.
-    bool locked = code != 0 && code != 3 && screen_locked();
+    bool locked = code != 0 && code != 3 && lock_screen_active();
     g_mutex_lock(&session_lock);
     if (start_closed) snprintf(session_error, sizeof session_error, "%s", closed_message());
     else if (locked) snprintf(session_error, sizeof session_error, "%s",
@@ -2209,7 +2237,8 @@ static void begin_session(void) {
   session_error[0] = 0;
   start_running = true;
   start_closed = false;
-  close_kind = CLOSE_NONE;
+  start_without_token = close_kind == CLOSE_PENDING;
+  if (!start_without_token) close_kind = CLOSE_NONE;
   resume_when_unlocked = false;
   g_thread_unref(g_thread_new("portal-start", start_session, GUINT_TO_POINTER(++attempt_id)));
 }
@@ -2924,7 +2953,10 @@ static gpointer stdin_thread(gpointer unused) {
   // A start still in progress is left to the desktop, which closes it with this process's bus connection.
   g_mutex_lock(&session_lock);
   if (session_state == SESSION_READY) teardown_session();
+  bool pending = close_kind == CLOSE_PENDING;
   g_mutex_unlock(&session_lock);
+  // A close not yet told apart is decided now, so a stopped approval does not outlive this helper.
+  if (pending) classify_close(NULL);
   g_main_loop_quit(loop);
   return NULL;
 }

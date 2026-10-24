@@ -83,8 +83,8 @@ macOS gives these permissions to the app that started the Paseo daemon. That is 
 
 The plugin shares whichever desktop the Paseo daemon can reach. The Paseo desktop app runs inside your desktop session, so it shares that one. A daemon started some other way, such as a systemd user service or `paseo daemon` over SSH, picks a desktop from its environment:
 
-- **`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` set:** the Wayland desktop, through the desktop portals.
-- **`DISPLAY` set** (and `XDG_SESSION_TYPE` not `wayland`): that X display.
+- **`XDG_SESSION_TYPE=wayland`, or `WAYLAND_DISPLAY` set while `XDG_SESSION_TYPE` is not `x11`:** the Wayland desktop, through the desktop portals.
+- **Otherwise, `DISPLAY` set:** that X display.
 - **Neither:** the plugin asks logind for the user's graphical session and uses it if it is Wayland. An X11 session can't be found this way, because the helper needs its `DISPLAY`.
 
 Restart the daemon after changing its environment. A daemon with only `DISPLAY=:0` set on a Wayland desktop reaches the XWayland server, which shows a black picture, so leave `DISPLAY` out for Wayland.
@@ -126,6 +126,7 @@ After=virtual-display.service
 Environment=DISPLAY=:10
 Environment=XDG_SESSION_TYPE=x11
 Environment=XDG_CURRENT_DESKTOP=XFCE
+UnsetEnvironment=WAYLAND_DISPLAY
 ExecStartPre=/bin/sh -c "for i in $(seq 50); do [ -e /tmp/.X11-unix/X10 ] && exit 0; sleep 0.2; done; exit 1"
 ExecStart=/usr/bin/dbus-run-session /usr/bin/startxfce4
 Restart=always
@@ -135,7 +136,7 @@ RestartSec=5
 WantedBy=default.target
 ```
 
-Then run the Paseo daemon with `DISPLAY=:10` and `XDG_SESSION_TYPE=x11` in its environment (`XDG_SESSION_TYPE` matters because a GNOME login passes `wayland` to user services), for example in its own user service:
+Then run the Paseo daemon with `DISPLAY=:10` and `XDG_SESSION_TYPE=x11` in its environment, and without `WAYLAND_DISPLAY`. A GNOME login passes `XDG_SESSION_TYPE=wayland` and `WAYLAND_DISPLAY` to user services, and with `WAYLAND_DISPLAY` set, apps that agents start would open on the physical screen instead. For example, in its own user service:
 
 ```ini
 # ~/.config/systemd/user/paseo-daemon.service
@@ -147,6 +148,7 @@ After=network-online.target virtual-display.service
 [Service]
 Environment=DISPLAY=:10
 Environment=XDG_SESSION_TYPE=x11
+UnsetEnvironment=WAYLAND_DISPLAY
 ExecStart=/opt/Paseo/resources/bin/paseo daemon run
 Restart=always
 RestartSec=5
@@ -192,7 +194,7 @@ Anyone paired with the host can see and control its screen while the plugin is e
 - On GNOME Wayland, locking the screen ends sharing, so a locked host has to be unlocked at the machine. Sharing resumes once it is unlocked. See [Headless and always-on Linux hosts](#headless-and-always-on-linux-hosts).
 - On Wayland, characters the host's keyboard layout lacks (✓, emoji, é on a US layout) cannot be typed; the desktop drops them. Paste them instead (⌘V or Ctrl+V), which works for any text.
 - On GNOME with display scaling, the pointer is placed with an absolute move near the corner followed by a relative move, because GNOME reads the portal's absolute positions as physical pixels. Other Wayland desktops get plain absolute moves.
-- On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` with the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.
+- On Linux, the key bar's Activities, Apps and workspace buttons use GNOME's default shortcuts, and lock-screen detection uses `gdbus` to read logind's `LockedHint`, falling back to the GNOME or freedesktop screensaver service. Other desktops still work, but those buttons may do nothing and the viewer may not say when the host is locked.
 - On Linux X11, characters outside Latin-1 (such as Cyrillic, Greek or €), and any character the host's keyboard layout lacks, are typed by briefly remapping a spare key. That takes about 30 ms per character, so paste long non-Latin text instead of typing it. Pasting with Ctrl+V does not work in terminals; use Ctrl+Shift+V (⌘⇧V from a Mac).
 - It is frame polling, not video. Fast motion looks choppy, and the frame rate depends on your link to the Paseo relay.
 - Granting the two macOS permissions needs someone physically at a Mac host once.
