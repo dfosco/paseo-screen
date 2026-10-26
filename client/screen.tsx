@@ -4,6 +4,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, Text, TextInput, View, type LayoutChangeEvent } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { chooseDisplayRpc, requestPermissionsRpc, statusRpc, type ScreenDisplay, type ScreenInputEvent, type ScreenModifier, type ScreenStatus } from "../shared/rpc";
 import { readLocalClipboard, useHostClipboard } from "./clipboard";
 import { FrameImage } from "./frame-image";
@@ -17,6 +18,7 @@ const isWeb = Platform.OS === "web";
 
 export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const insets = useSafeAreaInsets();
   const fetchStatus = useRpc(statusRpc);
   const status = useQuery({ queryKey: ["paseo-screen", "status"], queryFn: () => fetchStatus({}), refetchInterval: 5000 });
   const requestPermissions = useRpc(requestPermissionsRpc);
@@ -174,6 +176,7 @@ export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
         <KeyBar
           styles={styles}
           compact={layout.compact}
+          bottomInset={Platform.OS === "android" ? insets.bottom : 0}
           hostPlatform={hostPlatform}
           send={send}
           clipboard={clipboard.supported ? { copyFromHost: clipboard.pull, pasteToHost: () => void pasteLocalClipboard() } : null}
@@ -223,9 +226,10 @@ function PermissionBanner({ styles, linuxHost, status, loading, requesting, onRe
   );
 }
 
-function KeyBar({ styles, compact, hostPlatform, send, clipboard }: {
+function KeyBar({ styles, compact, bottomInset, hostPlatform, send, clipboard }: {
   styles: Styles;
   compact: boolean;
+  bottomInset: number;
   hostPlatform: string;
   send(event: ScreenInputEvent): void;
   clipboard: { copyFromHost(): void; pasteToHost(): void } | null;
@@ -250,74 +254,76 @@ function KeyBar({ styles, compact, hostPlatform, send, clipboard }: {
     setText("");
   };
   return (
-    <ScrollView horizontal style={styles.keyBarScroll} contentContainerStyle={styles.keyBar} keyboardShouldPersistTaps="handled">
-      <TextInput
-        style={styles.textInput}
-        value={text}
-        onChangeText={setText}
-        placeholder="Type on the host…"
-        placeholderTextColor={styles.meta.color}
-        onSubmitEditing={() => submit(true)}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
-      <ToolButton styles={styles} label="Send" onPress={() => submit(false)} />
-      <ToolButton styles={styles} label="Esc" onPress={key(KEY.escape)} />
-      <ToolButton styles={styles} label="Tab" onPress={key(KEY.tab)} />
-      <ToolButton styles={styles} label="⏎" onPress={key(KEY.enter)} />
-      <ToolButton styles={styles} label="⌫" onPress={key(KEY.backspace)} />
-      {hostPlatform === "win32" ? (
-        // Windows' default shortcuts; on a Windows host `cmd` is the Windows key.
-        <>
-          <ToolButton styles={styles} label="Alt+Tab" onPress={key(KEY.tab, ["alt"])} />
-          <ToolButton styles={styles} label="Task View" onPress={key(KEY.tab, ["cmd"])} />
-          <ToolButton styles={styles} label="Start" onPress={key(KEY.command)} />
-          <ToolButton styles={styles} label="Desktop" onPress={() => send({ type: "key", char: "d", modifiers: ["cmd"] })} />
-          <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
-          <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
-          <ToolButton styles={styles} label="◀ Desktop" onPress={key(KEY.left, ["ctrl", "cmd"])} />
-          <ToolButton styles={styles} label="Desktop ▶" onPress={key(KEY.right, ["ctrl", "cmd"])} />
-        </>
-      ) : hostPlatform === "linux" ? (
-        // GNOME's default shortcuts; on a Linux host `cmd` is the Super key.
-        <>
-          <ToolButton styles={styles} label="Super+Tab" onPress={key(KEY.tab, ["cmd"])} />
-          <ToolButton styles={styles} label="Activities" onPress={key(KEY.command)} />
-          <ToolButton styles={styles} label="Apps" onPress={() => send({ type: "key", char: "a", modifiers: ["cmd"] })} />
-          <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
-          <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
-          <ToolButton styles={styles} label="◀ Workspace" onPress={key(KEY.left, ["ctrl", "alt"])} />
-          <ToolButton styles={styles} label="Workspace ▶" onPress={key(KEY.right, ["ctrl", "alt"])} />
-        </>
-      ) : (
-        <>
-          <ToolButton styles={styles} label="⌘Tab" onPress={key(KEY.tab, ["cmd"])} />
-          <ToolButton styles={styles} label="⌘Space" onPress={key(KEY.space, ["cmd"])} />
-          <ToolButton styles={styles} label="⌘W" onPress={() => send({ type: "key", char: "w", modifiers: ["cmd"] })} />
-          <ToolButton styles={styles} label="⌘Q" onPress={() => send({ type: "key", char: "q", modifiers: ["cmd"] })} />
-          <ToolButton styles={styles} label="◀ Space" onPress={key(KEY.left, ["ctrl"])} />
-          <ToolButton styles={styles} label="Space ▶" onPress={key(KEY.right, ["ctrl"])} />
-          <ToolButton styles={styles} label="Mission Control" onPress={key(KEY.up, ["ctrl"])} />
-          <ToolButton styles={styles} label="App windows" onPress={key(KEY.down, ["ctrl"])} />
-        </>
-      )}
-      {clipboard ? (
-        <>
-          <ToolButton styles={styles} label="Copy from host" onPress={clipboard.copyFromHost} />
-          <ToolButton styles={styles} label="Paste to host" onPress={clipboard.pasteToHost} />
-        </>
-      ) : null}
-      {compact ? (
-        <>
-          <ToolButton styles={styles} label="←" onPress={key(KEY.left)} />
-          <ToolButton styles={styles} label="↑" onPress={key(KEY.up)} />
-          <ToolButton styles={styles} label="↓" onPress={key(KEY.down)} />
-          <ToolButton styles={styles} label="→" onPress={key(KEY.right)} />
-          <ToolButton styles={styles} label="Scroll ↑" onPress={() => send({ type: "scroll", dx: 0, dy: -300 })} />
-          <ToolButton styles={styles} label="Scroll ↓" onPress={() => send({ type: "scroll", dx: 0, dy: 300 })} />
-        </>
-      ) : null}
-    </ScrollView>
+    <View style={[styles.keyBarContainer, { paddingBottom: bottomInset }]}>
+      <ScrollView horizontal style={styles.keyBarScroll} contentContainerStyle={styles.keyBar} keyboardShouldPersistTaps="handled">
+        <TextInput
+          style={styles.textInput}
+          value={text}
+          onChangeText={setText}
+          placeholder="Type on the host…"
+          placeholderTextColor={styles.meta.color}
+          onSubmitEditing={() => submit(true)}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <ToolButton styles={styles} label="Send" onPress={() => submit(false)} />
+        <ToolButton styles={styles} label="Esc" onPress={key(KEY.escape)} />
+        <ToolButton styles={styles} label="Tab" onPress={key(KEY.tab)} />
+        <ToolButton styles={styles} label="⏎" onPress={key(KEY.enter)} />
+        <ToolButton styles={styles} label="⌫" onPress={key(KEY.backspace)} />
+        {hostPlatform === "win32" ? (
+          // Windows' default shortcuts; on a Windows host `cmd` is the Windows key.
+          <>
+            <ToolButton styles={styles} label="Alt+Tab" onPress={key(KEY.tab, ["alt"])} />
+            <ToolButton styles={styles} label="Task View" onPress={key(KEY.tab, ["cmd"])} />
+            <ToolButton styles={styles} label="Start" onPress={key(KEY.command)} />
+            <ToolButton styles={styles} label="Desktop" onPress={() => send({ type: "key", char: "d", modifiers: ["cmd"] })} />
+            <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
+            <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
+            <ToolButton styles={styles} label="◀ Desktop" onPress={key(KEY.left, ["ctrl", "cmd"])} />
+            <ToolButton styles={styles} label="Desktop ▶" onPress={key(KEY.right, ["ctrl", "cmd"])} />
+          </>
+        ) : hostPlatform === "linux" ? (
+          // GNOME's default shortcuts; on a Linux host `cmd` is the Super key.
+          <>
+            <ToolButton styles={styles} label="Super+Tab" onPress={key(KEY.tab, ["cmd"])} />
+            <ToolButton styles={styles} label="Activities" onPress={key(KEY.command)} />
+            <ToolButton styles={styles} label="Apps" onPress={() => send({ type: "key", char: "a", modifiers: ["cmd"] })} />
+            <ToolButton styles={styles} label="Ctrl+W" onPress={() => send({ type: "key", char: "w", modifiers: ["ctrl"] })} />
+            <ToolButton styles={styles} label="Alt+F4" onPress={key(KEY.f4, ["alt"])} />
+            <ToolButton styles={styles} label="◀ Workspace" onPress={key(KEY.left, ["ctrl", "alt"])} />
+            <ToolButton styles={styles} label="Workspace ▶" onPress={key(KEY.right, ["ctrl", "alt"])} />
+          </>
+        ) : (
+          <>
+            <ToolButton styles={styles} label="⌘Tab" onPress={key(KEY.tab, ["cmd"])} />
+            <ToolButton styles={styles} label="⌘Space" onPress={key(KEY.space, ["cmd"])} />
+            <ToolButton styles={styles} label="⌘W" onPress={() => send({ type: "key", char: "w", modifiers: ["cmd"] })} />
+            <ToolButton styles={styles} label="⌘Q" onPress={() => send({ type: "key", char: "q", modifiers: ["cmd"] })} />
+            <ToolButton styles={styles} label="◀ Space" onPress={key(KEY.left, ["ctrl"])} />
+            <ToolButton styles={styles} label="Space ▶" onPress={key(KEY.right, ["ctrl"])} />
+            <ToolButton styles={styles} label="Mission Control" onPress={key(KEY.up, ["ctrl"])} />
+            <ToolButton styles={styles} label="App windows" onPress={key(KEY.down, ["ctrl"])} />
+          </>
+        )}
+        {clipboard ? (
+          <>
+            <ToolButton styles={styles} label="Copy from host" onPress={clipboard.copyFromHost} />
+            <ToolButton styles={styles} label="Paste to host" onPress={clipboard.pasteToHost} />
+          </>
+        ) : null}
+        {compact ? (
+          <>
+            <ToolButton styles={styles} label="←" onPress={key(KEY.left)} />
+            <ToolButton styles={styles} label="↑" onPress={key(KEY.up)} />
+            <ToolButton styles={styles} label="↓" onPress={key(KEY.down)} />
+            <ToolButton styles={styles} label="→" onPress={key(KEY.right)} />
+            <ToolButton styles={styles} label="Scroll ↑" onPress={() => send({ type: "scroll", dx: 0, dy: -300 })} />
+            <ToolButton styles={styles} label="Scroll ↓" onPress={() => send({ type: "scroll", dx: 0, dy: 300 })} />
+          </>
+        ) : null}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -352,6 +358,7 @@ function createStyles(theme: PluginTheme) {
     error: { color: colors.statusDanger, fontSize: 12, paddingHorizontal: 10, paddingVertical: 4 },
     stage: { flex: 1, alignItems: "center" as const, justifyContent: "center" as const, backgroundColor: "#000" },
     placeholder: { color: colors.foregroundMuted },
+    keyBarContainer: { backgroundColor: colors.surface0 },
     keyBarScroll: { flexGrow: 0, borderTopWidth: 1, borderColor: colors.border },
     keyBar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, padding: 8 },
     textInput: { minWidth: 180, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: colors.border, color: colors.foreground, backgroundColor: colors.surface1 },
