@@ -1,5 +1,6 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { Platform } from "react-native";
 import { RemoteScreen } from "./client/screen";
 
 function ScreenItem({ currentScreen, openScreen, host }: PluginSidebarItemProps) {
@@ -15,6 +16,10 @@ function ScreenItem({ currentScreen, openScreen, host }: PluginSidebarItemProps)
 }
 
 export default function contribute(client: PluginClientContext) {
+  // The remote screen is intended for paired mobile clients. Loading it on desktop can
+  // recursively show the desktop Paseo surface inside its own screen view.
+  if (Platform.OS !== "android" && Platform.OS !== "ios") return () => {};
+
   const cleanups = [
     client.addScreen({ id: "screen", title: "Host screen", Component: RemoteScreen }),
     client.addSidebarHeaderItem({ id: "screen", title: "Host screen", Component: ScreenItem }),
