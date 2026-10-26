@@ -4,7 +4,6 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, Text, TextInput, View, type LayoutChangeEvent } from "react-native";
-import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { chooseDisplayRpc, requestPermissionsRpc, statusRpc, type ScreenDisplay, type ScreenInputEvent, type ScreenModifier, type ScreenStatus } from "../shared/rpc";
 import { readLocalClipboard, useHostClipboard } from "./clipboard";
 import { FrameImage } from "./frame-image";
@@ -16,17 +15,9 @@ import { useWebInput } from "./web-input";
 
 const isWeb = Platform.OS === "web";
 
-export function RemoteScreen(props: PluginScreenProps) {
-  return (
-    <SafeAreaProvider style={{ flex: 1 }}>
-      <RemoteScreenContent {...props} />
-    </SafeAreaProvider>
-  );
-}
-
-function RemoteScreenContent({ theme, layout, host }: PluginScreenProps) {
+export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
+  const bottomInset = Platform.OS === "android" ? 48 : 0;
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const insets = useSafeAreaInsets();
   const fetchStatus = useRpc(statusRpc);
   const status = useQuery({ queryKey: ["paseo-screen", "status"], queryFn: () => fetchStatus({}), refetchInterval: 5000 });
   const requestPermissions = useRpc(requestPermissionsRpc);
@@ -184,7 +175,7 @@ function RemoteScreenContent({ theme, layout, host }: PluginScreenProps) {
         <KeyBar
           styles={styles}
           compact={layout.compact}
-          bottomInset={Platform.OS === "android" ? insets.bottom : 0}
+          bottomInset={bottomInset}
           hostPlatform={hostPlatform}
           send={send}
           clipboard={clipboard.supported ? { copyFromHost: clipboard.pull, pasteToHost: () => void pasteLocalClipboard() } : null}
