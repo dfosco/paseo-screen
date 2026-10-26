@@ -4,7 +4,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, Text, TextInput, View, type LayoutChangeEvent } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { chooseDisplayRpc, requestPermissionsRpc, statusRpc, type ScreenDisplay, type ScreenInputEvent, type ScreenModifier, type ScreenStatus } from "../shared/rpc";
 import { readLocalClipboard, useHostClipboard } from "./clipboard";
 import { FrameImage } from "./frame-image";
@@ -16,7 +16,15 @@ import { useWebInput } from "./web-input";
 
 const isWeb = Platform.OS === "web";
 
-export function RemoteScreen({ theme, layout, host }: PluginScreenProps) {
+export function RemoteScreen(props: PluginScreenProps) {
+  return (
+    <SafeAreaProvider style={{ flex: 1 }}>
+      <RemoteScreenContent {...props} />
+    </SafeAreaProvider>
+  );
+}
+
+function RemoteScreenContent({ theme, layout, host }: PluginScreenProps) {
   const styles = useMemo(() => createStyles(theme), [theme]);
   const insets = useSafeAreaInsets();
   const fetchStatus = useRpc(statusRpc);
